@@ -58,7 +58,7 @@ class ImageViewLabel(QLabel):
 		self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
 		self.setMouseTracking(True)
 		self.setStyleSheet(
-			"QLabel { border: 1px solid #777; background: #111; color: #ddd; font-size: 14px; }"
+			"QLabel { border: 1px solid #777; background: #000; color: #ddd; font-size: 14px; }"
 		)
 
 	def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
@@ -96,7 +96,7 @@ class MainWindow(QMainWindow):
 		self._connect_btn = QPushButton("Connect MATLAB")
 		self._disconnect_btn = QPushButton("Disconnect")
 
-		self._play_btn = QPushButton("Play/Pause")
+		self._play_btn = QPushButton("Play/Pause [Space]")
 		self._step_back_btn = QPushButton("Previous [Left]")
 		self._step_fwd_btn = QPushButton("Next [Right]")
 		self._ping_spin = QSpinBox()
@@ -129,14 +129,17 @@ class MainWindow(QMainWindow):
 		self._load_saved_annotator()
 		self._shortcut_toggle_measure = QShortcut(QKeySequence("A"), self)
 		self._shortcut_toggle_grid = QShortcut(QKeySequence("G"), self)
+		self._shortcut_toggle_play = QShortcut(QKeySequence("Space"), self)
 		self._shortcut_step_back = QShortcut(QKeySequence("Left"), self)
 		self._shortcut_step_fwd = QShortcut(QKeySequence("Right"), self)
 		self._shortcut_toggle_measure.setContext(Qt.ShortcutContext.WindowShortcut)
 		self._shortcut_toggle_grid.setContext(Qt.ShortcutContext.WindowShortcut)
+		self._shortcut_toggle_play.setContext(Qt.ShortcutContext.WindowShortcut)
 		self._shortcut_step_back.setContext(Qt.ShortcutContext.WindowShortcut)
 		self._shortcut_step_fwd.setContext(Qt.ShortcutContext.WindowShortcut)
 		self._shortcut_toggle_measure.setAutoRepeat(False)
 		self._shortcut_toggle_grid.setAutoRepeat(False)
+		self._shortcut_toggle_play.setAutoRepeat(False)
 		app = QApplication.instance()
 		if app is not None:
 			app.installEventFilter(self)
@@ -220,6 +223,8 @@ class MainWindow(QMainWindow):
 		self._shortcut_toggle_measure.activatedAmbiguously.connect(self._toggle_measure_mode)
 		self._shortcut_toggle_grid.activated.connect(self._toggle_grid_mode)
 		self._shortcut_toggle_grid.activatedAmbiguously.connect(self._toggle_grid_mode)
+		self._shortcut_toggle_play.activated.connect(self._controller.toggle_play)
+		self._shortcut_toggle_play.activatedAmbiguously.connect(self._controller.toggle_play)
 		self._shortcut_step_back.activated.connect(self._controller.step_back)
 		self._shortcut_step_back.activatedAmbiguously.connect(self._controller.step_back)
 		self._shortcut_step_fwd.activated.connect(self._controller.step_forward)
@@ -324,7 +329,7 @@ class MainWindow(QMainWindow):
 		self._timeline.setMaximum(max(1, state.discovered_max_ping_index))
 		self._timeline.setValue(state.current_ping_index)
 		self._timeline.blockSignals(False)
-		self._play_btn.setText("Pause" if state.is_playing else "Play")
+		self._play_btn.setText("Pause [Space]" if state.is_playing else "Play [Space]")
 
 	def _set_status(self, text: str) -> None:
 		self._status_label.setText(f"Status: {text}")
