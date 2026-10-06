@@ -1,0 +1,6 @@
+numpy<2.0
+opencv-python
+matlabengine; platform_system=="Windows"
+matplotlib
+PySide6==6.7.2
+
