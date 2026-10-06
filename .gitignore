@@ -1,0 +1,6 @@
+﻿M3_MATLAB_Toolbox_1/
+outputs/
+outputs2/
+.venv/
+__pycache__/
+*.pyc
