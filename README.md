@@ -1,212 +1,119 @@
-Flexview Python Reader (MATLAB Engine)
+# Flexview Player (Python + MATLAB Engine)
 
-Overview
-- This project provides a Python-based workflow for Kongsberg Mesotech Flexview/M3 data using MATLAB Engine to parse proprietary files (`.imb`, `.mmb`, `.pmb`).
-- Python handles visualization, artifact export, and parity summaries for comparison against MATLAB example outputs.
+This project is focused on a Python player and annotation tool for Flexview IMB data.
+MATLAB Engine is used for data decoding, and Python handles playback UI, rendering, and exports.
 
-Structure
-- `flexview_py/`
-  - `__init__.py`
-  - `matlab_bridge.py` — MATLAB Engine session and wrappers for `load_image_data`, `load_raw_data`, `load_profile_data`.
-  - `imb_reader.py` — High-level IMB reader returning NumPy arrays.
-  - `geometry.py` — Range calculation, polar-to-cartesian mapping, display utilities.
-  - `display.py` — OpenCV routines to render frames and simple polar grid.
-  - `reporting.py` — JSON-safe summary helpers and parity stats utilities.
-- `matlab_helpers/`
-  - `load_raw_data_py.m` — MATLAB helper to expose raw-data header metadata in a Python-safe format.
-  - `beamform_ping_py.m` — MATLAB helper that mirrors `test_beamformer` workflow and returns Python-safe outputs.
-  - `generate_xyz_point_cloud_py.m` — MATLAB helper for georeferenced PMB export with Python-safe summary metadata.
-  - `split_beam_ping_py.m` — MATLAB helper that mirrors `test_split_beam` workflow for parity outputs.
-  - `export_google_map_py.m` — MATLAB helper for google-map track export summary.
-- `flexview_player/`
-  - Milestone 1 desktop player scaffold (`py -m flexview_player`) with PySide6 UI, MATLAB session controls, and IMB file-open flow.
-- `examples/`
-  - `play_imb.py` — Load one `.imb` ping and save raw/cartesian figures plus summary JSON.
-  - `play_mmb.py` — Load one `.mmb` raw ping and save diagnostics plus summary JSON.
-  - `play_beamformer.py` — Beamform one `.mmb` ping and save polar/fan views plus summary JSON.
-  - `play_split_beam.py` — Run split-beam AOA workflow and save array/phase/magnitude artifacts plus summary JSON.
-  - `export_pmb_xyz.py` — Export `.pmb` profile points to XYZ with preview image and summary JSON.
-  - `export_pmb_xyz_georef.py` — Run full georeferenced PMB point-cloud workflow and export `.xyz` plus summary JSON.
-  - `export_google_map.py` — Generate Google map tracks HTML and summary JSON from `.mmb` files.
+If you only need one command to get started:
 
-Prerequisites
-- MATLAB installed with MATLAB Engine for Python. Install the engine from MATLAB:
-  - Launch the MATLAB version you plan to use.
-  - In MATLAB Command Window:
-    - `cd(fullfile(matlabroot,'extern','engines','python')); system('py -3 -m pip install .');`
-- Python 3.9+ recommended.
-
-Install
-```bash
-py -3 -m venv .venv
-.venv\\Scripts\\activate
-py -3 -m pip install -r requirements.txt
-```
-
-Usage
-
-Desktop player (Milestone 1 scaffold)
 ```bash
 py -3 -m flexview_player
 ```
-This currently includes MATLAB connect/disconnect, IMB file-open, single-frame rendering
-(polar + cartesian), ping seek/step controls, and timer-based play/pause playback.
 
-IMB playback (single ping/frame)
-```bash
-py -3 examples\\play_imb.py --file "path\\to\\Intakes.imb" --ping-index 3 --save-dir outputs --no-show
-```
+Current player scope: `.imb` files.
 
-MMB raw diagnostics (single ping)
-```bash
-py -3 examples\\play_mmb.py --file "path\\to\\Im30,LFM,fewpings.mmb" --ping-index 1 --image-index 0 --save-dir outputs --no-show
-```
+## Quick Start
 
-MMB beamforming parity (single ping)
-```bash
-py -3 examples\\play_beamformer.py --file "path\\to\\Im30,LFM,fewpings.mmb" --ping-index 1 --image-index 0 --save-dir outputs --no-show
-```
+### 1) Prerequisites
 
-PMB profile export (ping range)
-```bash
-py -3 examples\\export_pmb_xyz.py --file "path\\to\\Log_Profile.pmb" --ping-start 0 --ping-end 3 --save-dir outputs --no-show
-```
+- MATLAB installed locally.
+- MATLAB Engine for Python installed from the same MATLAB version:
 
-Split-beam AOA parity workflow
-```bash
-py -3 examples\\play_split_beam.py --file "path\\to\\2014,Dec,16,10-53-25snip.mmb" --ping-index 1 --save-dir outputs --no-show
-```
-
-Georeferenced PMB point-cloud parity workflow
-```bash
-py -3 examples\\export_pmb_xyz_georef.py --file "path\\to\\Log_Profile.pmb" --ping-start 0 --ping-end 300 --save-dir outputs --no-show
-```
-By default this saves Python-generated diagnostic figures (position track, heading/course, pitch/roll).
-To additionally save MATLAB-generated figures, pass `--save-matlab-figures`.
-
-Google map track export parity workflow
-```bash
-py -3 examples\\export_google_map.py --folder "path\\to\\data" --html-filename "google_tracks_phase3.html" --ping-step 10 --save-dir outputs
-```
-
-Sample commands using bundled toolbox data
-```bash
-py -3 examples\\play_imb.py --file "M3_MATLAB_Toolbox_1.2\\data\\Intakes.imb" --ping-index 3 --save-dir outputs --no-show
-py -3 examples\\play_mmb.py --file "M3_MATLAB_Toolbox_1.2\\data\\Im30,LFM,fewpings.mmb" --ping-index 1 --save-dir outputs --no-show
-py -3 examples\\play_beamformer.py --file "M3_MATLAB_Toolbox_1.2\\data\\Im30,LFM,fewpings.mmb" --ping-index 1 --save-dir outputs --no-show
-py -3 examples\\export_pmb_xyz.py --file "M3_MATLAB_Toolbox_1.2\\data\\Log_Profile.pmb" --ping-start 0 --ping-end 3 --save-dir outputs --no-show
-py -3 examples\\play_split_beam.py --file "M3_MATLAB_Toolbox_1.2\\data\\2014,Dec,16,10-53-25snip.mmb" --ping-index 1 --save-dir outputs --no-show
-py -3 examples\\export_pmb_xyz_georef.py --file "M3_MATLAB_Toolbox_1.2\\data\\Log_Profile.pmb" --ping-start 0 --ping-end 300 --save-dir outputs --no-show
-py -3 examples\\export_google_map.py --folder "M3_MATLAB_Toolbox_1.2\\data" --html-filename "google_tracks_phase3.html" --ping-step 10 --save-dir outputs
-```
-
-Saved artifacts and parity summaries
-- IMB:
-  - `*_raw_polar_linear.png`
-  - `*_cartesian_fan_log.png`
-  - `*_image_summary.json`
-- MMB:
-  - `*_raw_magnitude.png`
-  - `*_ref_pulse.png`
-  - `*_raw_summary.json`
-- MMB Beamformer:
-  - `*_beamformed_polar_linear.png`
-  - `*_beamformed_cartesian_log.png`
-  - `*_beamformer_summary.json`
-- MMB Split Beam:
-  - `*_split_full_array.png`
-  - `*_split_sub_array_1.png`
-  - `*_split_sub_array_2.png`
-  - `*_split_phase_diff.png`
-  - `*_split_magnitude_fit.png`
-  - `*_split_beam_summary.json`
-- PMB:
-  - `*_profile.xyz`
-  - `*_profile_preview.png`
-  - `*_profile_summary.json`
-- PMB Georeferenced:
-  - `*_georef_*.xyz`
-  - `*_georef_*_preview.png`
-  - `*_georef_*_summary.json`
-  - `*_python_nav_latlon.png`
-  - `*_python_nav_xy.png`
-  - `*_python_heading_course.png`
-  - `*_python_pitch_roll.png`
-  - optional: `*_matlab_fig_*.png` when `--save-matlab-figures` is used
-- Google Map:
-  - `google_tracks*.html`
-  - `markerwithlabel.js`
-  - `*_google_map_summary.json`
-
-The summary JSON files are intended for parity checks against MATLAB examples and include:
-- key header fields (ping identifiers, beam/sample counts, timing parameters)
-- array dimensions
-- basic intensity/range statistics
-
-MATLAB and Python parity command pairs
-
-Split-beam parity (MATLAB)
 ```matlab
-toolbox_root = 'C:\Users\bruce\Documents\Research\Python Flexview Reader\M3_MATLAB_Toolbox_1.2';
-addpath(genpath(toolbox_root));
-cd(fullfile(toolbox_root,'examples'));
-test_split_beam
+cd(fullfile(matlabroot,'extern','engines','python'));
+system('py -3 -m pip install .');
 ```
 
-Split-beam parity (Python)
+- Python 3.9+ recommended.
+
+### 2) Install dependencies
+
 ```bash
-py -3 examples\\play_split_beam.py --file "M3_MATLAB_Toolbox_1.2\\data\\2014,Dec,16,10-53-25snip.mmb" --ping-index 1 --save-dir outputs --no-show
+py -3 -m venv .venv
+.venv\Scripts\activate
+py -3 -m pip install -r requirements.txt
 ```
 
-Compare key fields:
-- AOA (`AOA_degrees`)
-- beam offset (`beam_offset_degrees`)
-- strength (`strength_dB`)
-- range at target (`range_meters`)
+### 3) Launch player
 
-Georeferenced PMB parity (MATLAB)
-```matlab
-toolbox_root = 'C:\Users\bruce\Documents\Research\Python Flexview Reader\M3_MATLAB_Toolbox_1.2';
-addpath(genpath(toolbox_root));
-settings.filename_pmb = fullfile(toolbox_root,'data','Log_Profile.pmb');
-settings.filename_xyz = fullfile(toolbox_root,'data','Log_Profile_from_matlab.xyz');
-options.ping_start = 0;
-options.ping_end = 300;
-options.z_max = 0;
-options.pitch_sensor_offset = 1;
-generate_xyz_point_cloud(settings, options);
-```
-
-Georeferenced PMB parity (Python)
 ```bash
-py -3 examples\\export_pmb_xyz_georef.py --file "M3_MATLAB_Toolbox_1.2\\data\\Log_Profile.pmb" --ping-start 0 --ping-end 300 --z-max 0 --pitch-sensor-offset 1 --save-dir outputs --no-show
+py -3 -m flexview_player
 ```
 
-Compare key fields:
-- total point count
-- XYZ bounds (`x_min/max`, `y_min/max`, `z_min/max`)
+## Player Workflow
 
-Google map export parity (MATLAB)
-```matlab
-toolbox_root = 'C:\Users\bruce\Documents\Research\Python Flexview Reader\M3_MATLAB_Toolbox_1.2';
-addpath(genpath(toolbox_root));
-cd(fullfile(toolbox_root,'examples'));
-test_google_map
-```
+1. Click `Connect MATLAB`.
+2. Click `Open .imb` and choose a file.
+3. Navigate pings with play/pause, step buttons, timeline, and ping index spinner.
+4. Toggle `Grid` and `Fan Focus` as needed while reviewing the fan view.
+5. Use measurement mode to stage and save distances on the fan view.
 
-Google map export parity (Python)
+## Player Controls
+
+### Playback
+
+- `Play/Pause [Space]`: start/stop timed playback.
+- `Previous [Left]`: load previous ping.
+- `Next [Right]`: load next ping.
+- `Ping` spinner and `Timeline` slider: jump to any ping index.
+- `Speed`: `0.25x`, `0.5x`, `1.0x`, `2.0x`.
+
+### View
+
+- `Grid: On/Off [G]`: toggle fan-view grid overlay.
+- `Fan Focus: On/Off [F]`: hide/show the polar panel to give the fan view more space.
+- Polar and cartesian fan views are shown side-by-side.
+
+### Measurement
+
+- `Measure: On/Off [A]`: enable/disable distance measurement mode.
+- Click point A, then point B in the cartesian fan view to stage one measurement.
+- `Z`: undo last click (or last staged measurement if no active click).
+- `S`: save all staged measurements.
+- `Annotator` button: set the annotator name used in saved measurement files.
+
+## Features
+
+- MATLAB connect/disconnect from the UI.
+- `.imb` file open + ping-by-ping playback.
+- End-of-file handling while stepping/playing.
+- Polar and cartesian fan rendering per frame.
+- Fan Focus mode (`F`) to prioritize cartesian fan inspection.
+- Dynamic cartesian render target synced to panel size and display scale (DPI-aware).
+- Aspect-aware cartesian rendering to avoid unnecessary fan-view upscaling.
+- Cursor readout in fan view (`x`, `z`, `range`, `angle`).
+- Staged measurement workflow with JSON export.
+
+## Measurement Output Files
+
+Saved under:
+
+- `outputs/<dataset_name>/measurements/<annotator_slug>/all_measurements_<annotator_slug>.json`
+- `outputs/<dataset_name>/measurements/<annotator_slug>/ping_<ping_index>_measurements_<annotator_slug>.json`
+
+Each measurement includes:
+
+- ping/frame metadata
+- point A and point B in pixel/world coordinates
+- distance in meters
+- annotator identity and save timestamp
+
+## Script Commands (Non-Player Workflows)
+
+These scripts are for parity checks and data exports beyond interactive player use.
+
 ```bash
-py -3 examples\\export_google_map.py --folder "M3_MATLAB_Toolbox_1.2\\data" --html-filename "google_tracks_phase3.html" --ping-step 10 --save-dir outputs
+py -3 examples\play_imb.py --file "path\to\Intakes.imb" --ping-index 3 --save-dir outputs --no-show
+py -3 examples\play_mmb.py --file "path\to\Im30,LFM,fewpings.mmb" --ping-index 1 --image-index 0 --save-dir outputs --no-show
+py -3 examples\play_beamformer.py --file "path\to\Im30,LFM,fewpings.mmb" --ping-index 1 --image-index 0 --save-dir outputs --no-show
+py -3 examples\play_split_beam.py --file "path\to\2014,Dec,16,10-53-25snip.mmb" --ping-index 1 --save-dir outputs --no-show
+py -3 examples\export_pmb_xyz.py --file "path\to\Log_Profile.pmb" --ping-start 0 --ping-end 3 --save-dir outputs --no-show
+py -3 examples\export_pmb_xyz_georef.py --file "path\to\Log_Profile.pmb" --ping-start 0 --ping-end 300 --save-dir outputs --no-show
+py -3 examples\export_google_map.py --folder "path\to\data" --html-filename "google_tracks_phase3.html" --ping-step 10 --save-dir outputs
 ```
 
-Compare key fields:
-- number of source files
-- track count and marker count
-- SW/NE map bounds
+## Project Layout
 
-Design Notes
-- Data access flows through MATLAB Engine to leverage vendor readers.
-- IMB/MMB/PMB decode paths all use MATLAB readers as source of truth.
-- Geometry formulas in Python mirror MATLAB formulas used in toolbox examples.
-
-
+- `flexview_player/`: desktop player (PySide6 UI + playback controller).
+- `flexview_py/`: MATLAB bridge, readers, geometry, rendering, reporting helpers.
+- `matlab_helpers/`: MATLAB helper functions used by Python tooling.
+- `examples/`: script-based parity and export workflows.
