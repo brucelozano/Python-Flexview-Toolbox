@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 	QApplication,
 	QComboBox,
 	QFileDialog,
+	QGridLayout,
 	QHBoxLayout,
 	QInputDialog,
 	QLabel,
@@ -80,16 +81,19 @@ class MainWindow(QMainWindow):
 	def __init__(self, controller: PlaybackController) -> None:
 		super().__init__()
 		self._controller = controller
-		self.setWindowTitle("Flexview Player (Milestone 3)")
+		self.setWindowTitle("Flexview Player")
 		self.resize(1200, 760)
 
 		self._status_label = QLabel("Status: Ready")
 		self._connected_label = QLabel("MATLAB: Disconnected")
-		self._file_label = QLabel("File: (none)")
-		self._meta_label = QLabel("Frame: (none)")
+		self._file_label = QLabel("(none)")
+		self._file_label.setWordWrap(True)
+		self._meta_label = QLabel("Index: - | Ping: - | Size: - | Beam: - | Range: -")
 		self._meta_label.setWordWrap(True)
-		self._cursor_label = QLabel("Cursor (fan view): -")
-		self._measurement_label = QLabel("Measurement: mode off. Click 'Measure' or press A.")
+		self._cursor_label = QLabel("x: - | z: - | range: - | angle: -")
+		self._measurement_label = QLabel(
+			"Mode OFF | Annotator (not set) | Staged 0 | Click 'Measure' or press A."
+		)
 		self._measurement_label.setWordWrap(True)
 
 		self._open_btn = QPushButton("Open .imb")
@@ -170,14 +174,43 @@ class MainWindow(QMainWindow):
 		top_bar.addWidget(self._open_btn)
 		top_bar.addWidget(self._connect_btn)
 		top_bar.addWidget(self._disconnect_btn)
-		top_bar.addSpacing(20)
-		top_bar.addWidget(self._connected_label)
 		top_bar.addStretch(1)
 		root_layout.addLayout(top_bar)
-		root_layout.addWidget(self._file_label)
-		root_layout.addWidget(self._meta_label)
-		root_layout.addWidget(self._cursor_label)
-		root_layout.addWidget(self._measurement_label)
+
+		info_panel = QWidget(self)
+		info_panel.setObjectName("infoPanel")
+		info_panel.setStyleSheet(
+			"#infoPanel { border: 1px solid #555; border-radius: 4px; background: #1d1d1d; }"
+			"#infoPanel QLabel { border: none; background: transparent; color: #ddd; }"
+			"#infoPanel QLabel[infoRole='key'] { color: #bcbcbc; font-weight: 600; }"
+		)
+		info_grid = QGridLayout(info_panel)
+		info_grid.setContentsMargins(8, 6, 8, 6)
+		info_grid.setHorizontalSpacing(10)
+		info_grid.setVerticalSpacing(4)
+
+		session_key = QLabel("Session")
+		session_key.setProperty("infoRole", "key")
+		file_key = QLabel("File")
+		file_key.setProperty("infoRole", "key")
+		frame_key = QLabel("Frame")
+		frame_key.setProperty("infoRole", "key")
+		cursor_key = QLabel("Cursor")
+		cursor_key.setProperty("infoRole", "key")
+		measurement_key = QLabel("Measurement")
+		measurement_key.setProperty("infoRole", "key")
+
+		info_grid.addWidget(session_key, 0, 0)
+		info_grid.addWidget(self._connected_label, 0, 1)
+		info_grid.addWidget(file_key, 1, 0)
+		info_grid.addWidget(self._file_label, 1, 1)
+		info_grid.addWidget(frame_key, 2, 0)
+		info_grid.addWidget(self._meta_label, 2, 1)
+		info_grid.addWidget(cursor_key, 3, 0)
+		info_grid.addWidget(self._cursor_label, 3, 1)
+		info_grid.addWidget(measurement_key, 4, 0)
+		info_grid.addWidget(self._measurement_label, 4, 1)
+		root_layout.addWidget(info_panel)
 
 		views_layout = QHBoxLayout()
 		views_layout.setSpacing(8)
@@ -347,7 +380,17 @@ class MainWindow(QMainWindow):
 	def _apply_state(self, state_obj: object) -> None:
 		state = state_obj if isinstance(state_obj, PlayerState) else self._controller.state()
 		self._connected_label.setText("MATLAB: Connected" if state.connected else "MATLAB: Disconnected")
-		self._file_label.setText(f"File: {state.file_path or '(none)'}")
+		if state.file_path:
+			file_path = Path(state.file_path)
+			parent_name = file_path.parent.name
+			if parent_name:
+				self._file_label.setText(f"{file_path.name} | Folder: {parent_name}")
+			else:
+				self._file_label.setText(file_path.name)
+			self._file_label.setToolTip(state.file_path)
+		else:
+			self._file_label.setText("(none)")
+			self._file_label.setToolTip("")
 		self._ping_spin.blockSignals(True)
 		self._ping_spin.setValue(state.current_ping_index)
 		self._ping_spin.blockSignals(False)
@@ -360,6 +403,23 @@ class MainWindow(QMainWindow):
 	def _set_status(self, text: str) -> None:
 		self._status_label.setText(f"Status: {text}")
 
+	def _set_cursor_readout(self, world: WorldPoint | None) -> None:
+		if world is None:
+			self._cursor_label.setText("x: - | z: - | range: - | angle: -")
+			return
+		x_m, z_m, range_m, angle_deg = world
+		self._cursor_label.setText(
+			f"x: {x_m:.2f} m | z: {z_m:.2f} m | range: {range_m:.2f} m | angle: {angle_deg:.2f} deg"
+		)
+
+	def _set_measurement_summary(self, detail: str) -> None:
+		mode_text = "ON" if self._measurement_mode_enabled else "OFF"
+		annotator_text = self._annotator_name if self._annotator_name else "(not set)"
+		staged_count = len(self._staged_measurements)
+		self._measurement_label.setText(
+			f"Mode {mode_text} | Annotator {annotator_text} | Staged {staged_count} | {detail}"
+		)
+
 	def _on_frame_ready(self, frame_obj: object) -> None:
 		if not isinstance(frame_obj, RenderedFrame):
 			return
@@ -371,11 +431,10 @@ class MainWindow(QMainWindow):
 		self._update_measurement_label()
 		self._refresh_pixmaps()
 		self._meta_label.setText(
-			"Frame: "
-			f"ping_index={frame.ping_index}, ping_number={frame.ping_number}, "
-			f"shape={frame.shape[0]}x{frame.shape[1]}, "
-			f"beam=[{frame.beam_min_deg:.2f},{frame.beam_max_deg:.2f}] deg, "
-			f"range=[{frame.range_min_m:.2f},{frame.range_max_m:.2f}] m"
+			f"Index: {frame.ping_index} | Ping: {frame.ping_number} | "
+			f"Size: {frame.shape[0]} x {frame.shape[1]} | "
+			f"Beam: {frame.beam_min_deg:.2f} to {frame.beam_max_deg:.2f} deg | "
+			f"Range: {frame.range_min_m:.2f} to {frame.range_max_m:.2f} m"
 		)
 
 	def resizeEvent(self, event) -> None:  # type: ignore[override]
@@ -495,66 +554,45 @@ class MainWindow(QMainWindow):
 
 	def _update_measurement_label(self, *, last_distance_m: float | None = None) -> None:
 		if not self._measurement_mode_enabled:
-			self._measurement_label.setText("Measurement: mode off. Click 'Measure' or press A.")
+			self._set_measurement_summary("Click 'Measure' or press A.")
 			return
 
-		annotator_hint = (
-			f"Annotator={self._annotator_name}. "
-			if self._annotator_name
-			else "Annotator not set. "
-		)
 		staged_count = len(self._staged_measurements)
 		if len(self._measure_current_points_px) == 1:
 			point_a = self._measure_current_points_px[0]
 			world_a = self._cart_pixel_to_world(point_a[0], point_a[1])
 			if world_a is not None:
-				self._measurement_label.setText(
-					f"{annotator_hint}Measurement: point A set at x={world_a[0]:.2f} m, z={world_a[1]:.2f} m. "
-					f"Staged={staged_count}. Click point B. Press Z to undo."
+				self._set_measurement_summary(
+					f"Point A: x={world_a[0]:.2f} m, z={world_a[1]:.2f} m | Click point B | Z=undo."
 				)
 			else:
-				self._measurement_label.setText(
-					f"{annotator_hint}Measurement: point A set. Staged={staged_count}. Click point B. Press Z to undo."
-				)
+				self._set_measurement_summary("Point A set | Click point B | Z=undo.")
 			return
 
 		if staged_count > 0:
-			prefix = f"Measurement: {staged_count} staged annotation(s)."
 			if last_distance_m is not None:
-				prefix = (
-					f"Measurement: staged {staged_count} annotation(s); "
-					f"last distance {last_distance_m:.2f} m."
+				self._set_measurement_summary(
+					f"Last distance: {last_distance_m:.2f} m | Click A then B | Z=undo, S=save."
 				)
-			self._measurement_label.setText(
-				f"{annotator_hint}{prefix} Click point A then point B for next. "
-				"Press Z to undo last, S to save all."
-			)
+			else:
+				self._set_measurement_summary("Click A then B for next | Z=undo, S=save.")
 			return
 
-		self._measurement_label.setText(
-			f"{annotator_hint}Measurement: mode on. Click point A then point B. "
-			"Press Z to undo, S to save staged annotations."
-		)
+		self._set_measurement_summary("Click point A then B | Z=undo, S=save.")
 
 	def _on_cart_mouse_left(self) -> None:
-		self._cursor_label.setText("Cursor (fan view): -")
+		self._set_cursor_readout(None)
 
 	def _on_cart_mouse_moved(self, pos_obj: object) -> None:
 		if self._cart_pixmap is None:
-			self._cursor_label.setText("Cursor (fan view): -")
+			self._set_cursor_readout(None)
 			return
 		pixel = self._view_pos_to_source_pixel(self._cart_view, self._cart_pixmap, pos_obj)
 		if pixel is None:
-			self._cursor_label.setText("Cursor (fan view): -")
+			self._set_cursor_readout(None)
 			return
 		world = self._cart_pixel_to_world(pixel[0], pixel[1])
-		if world is None:
-			self._cursor_label.setText("Cursor (fan view): -")
-			return
-		x_m, z_m, range_m, angle_deg = world
-		self._cursor_label.setText(
-			f"Cursor (fan view): x={x_m:.2f} m, z={z_m:.2f} m, range={range_m:.2f} m, angle={angle_deg:.2f} deg"
-		)
+		self._set_cursor_readout(world)
 
 	def _on_cart_mouse_pressed(self, pos_obj: object) -> None:
 		if not self._measurement_mode_enabled:
@@ -570,10 +608,7 @@ class MainWindow(QMainWindow):
 
 		self._measure_current_points_px.append(pixel)
 		if len(self._measure_current_points_px) == 1:
-			self._measurement_label.setText(
-				f"Measurement: point A set at x={world[0]:.2f} m, z={world[1]:.2f} m. "
-				f"Staged={len(self._staged_measurements)}. Click point B. Press Z to undo."
-			)
+			self._update_measurement_label()
 		else:
 			world_a = self._cart_pixel_to_world(
 				self._measure_current_points_px[0][0], self._measure_current_points_px[0][1]
@@ -728,12 +763,6 @@ class MainWindow(QMainWindow):
 		)
 		self._reset_measurement_state()
 		self._update_measurement_label()
-		if self._measurement_mode_enabled:
-			action_word = "replaced" if replaced_existing else "saved"
-			self._measurement_label.setText(
-				f"Annotator={self._annotator_name}. Measurement: {action_word} {staged_count} annotation(s). "
-				"Click point A then point B to stage more, press Z to undo, then S to save all."
-			)
 		self._refresh_pixmaps()
 
 	def _measurement_paths(self, source_file: str, ping_index: int, annotator_slug: str) -> tuple[Path, Path, Path]:
