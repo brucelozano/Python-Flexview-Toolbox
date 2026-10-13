@@ -60,6 +60,7 @@ class MatlabDataWorker:
 		file_path: str,
 		ping_index: int,
 		cart_width_px: int = 900,
+		cart_height_px: int = 700,
 		show_grid: bool = True,
 	) -> RenderedFrame:
 		if self._session is None or self._reader is None:
@@ -78,8 +79,18 @@ class MatlabDataWorker:
 
 		# Cartesian fan rendering.
 		x_coords, z_coords = polar_to_cartesian(ranges, beam_angles)
+		cart_target_width = max(1, int(cart_width_px))
+		cart_target_height = max(1, int(cart_height_px))
+		cart_width_m = max(1e-6, float(np.max(x_coords) - np.min(x_coords)))
+		cart_height_m = max(1e-6, float(np.max(z_coords)))
+		# Use whichever panel dimension is limiting so we avoid upscaling in the UI.
+		cart_aspect = cart_width_m / cart_height_m
+		cart_render_width_px = max(
+			cart_target_width,
+			int(round(cart_target_height * cart_aspect)),
+		)
 		cart_bgr = render_cartesian_image(
-			magnitude_log10(image), x_coords, z_coords, output_width_px=cart_width_px
+			magnitude_log10(image), x_coords, z_coords, output_width_px=cart_render_width_px
 		)
 		if show_grid:
 			draw_polar_grid(cart_bgr, ranges, beam_angles)

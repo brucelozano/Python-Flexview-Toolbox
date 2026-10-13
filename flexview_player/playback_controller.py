@@ -31,6 +31,8 @@ class PlaybackController(QObject):
 		self._worker = MatlabDataWorker()
 		self._state = PlayerState()
 		self._show_grid = True
+		self._cart_render_width_px = 900
+		self._cart_render_height_px = 700
 		self._timer = QTimer(self)
 		self._timer.timeout.connect(self._on_timer_tick)
 		self._set_timer_interval()
@@ -103,6 +105,30 @@ class PlaybackController(QObject):
 	def set_show_grid(self, show_grid: bool) -> None:
 		self._show_grid = bool(show_grid)
 
+	def set_cart_render_target(
+		self,
+		width_px: int,
+		height_px: int,
+		*,
+		refresh_if_paused: bool = False,
+	) -> None:
+		target_w = max(1, int(width_px))
+		target_h = max(1, int(height_px))
+		if (
+			target_w == self._cart_render_width_px
+			and target_h == self._cart_render_height_px
+		):
+			return
+		self._cart_render_width_px = target_w
+		self._cart_render_height_px = target_h
+		if (
+			refresh_if_paused
+			and self._state.connected
+			and bool(self._state.file_path)
+			and not self._state.is_playing
+		):
+			self._load_frame(self._state.current_ping_index, status=False)
+
 	def _load_frame(self, ping_index: int, status: bool = True) -> bool:
 		if not self._state.file_path:
 			if status:
@@ -117,6 +143,8 @@ class PlaybackController(QObject):
 			frame: RenderedFrame = self._worker.load_imb_frame(
 				self._state.file_path,
 				ping_index,
+				cart_width_px=self._cart_render_width_px,
+				cart_height_px=self._cart_render_height_px,
 				show_grid=self._show_grid,
 			)
 		except Exception as exc:

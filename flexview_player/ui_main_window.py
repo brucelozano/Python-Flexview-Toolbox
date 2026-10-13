@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import QEvent, QSettings, Qt, Signal
+from PySide6.QtCore import QEvent, QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (
 	QApplication,
@@ -110,6 +110,9 @@ class MainWindow(QMainWindow):
 		self._grid_toggle_btn = QPushButton("Grid: On [G]")
 		self._grid_toggle_btn.setCheckable(True)
 		self._grid_toggle_btn.setChecked(True)
+		self._fan_focus_btn = QPushButton("Fan Focus: Off [F]")
+		self._fan_focus_btn.setCheckable(True)
+		self._fan_focus_btn.setChecked(False)
 		self._annotator_btn = QPushButton("Annotator: (set)")
 		self._measure_mode_btn = QPushButton("Measure: Off [A]")
 		self._measure_mode_btn.setCheckable(True)
@@ -129,17 +132,24 @@ class MainWindow(QMainWindow):
 		self._load_saved_annotator()
 		self._shortcut_toggle_measure = QShortcut(QKeySequence("A"), self)
 		self._shortcut_toggle_grid = QShortcut(QKeySequence("G"), self)
+		self._shortcut_toggle_fan_focus = QShortcut(QKeySequence("F"), self)
 		self._shortcut_toggle_play = QShortcut(QKeySequence("Space"), self)
 		self._shortcut_step_back = QShortcut(QKeySequence("Left"), self)
 		self._shortcut_step_fwd = QShortcut(QKeySequence("Right"), self)
 		self._shortcut_toggle_measure.setContext(Qt.ShortcutContext.WindowShortcut)
 		self._shortcut_toggle_grid.setContext(Qt.ShortcutContext.WindowShortcut)
+		self._shortcut_toggle_fan_focus.setContext(Qt.ShortcutContext.WindowShortcut)
 		self._shortcut_toggle_play.setContext(Qt.ShortcutContext.WindowShortcut)
 		self._shortcut_step_back.setContext(Qt.ShortcutContext.WindowShortcut)
 		self._shortcut_step_fwd.setContext(Qt.ShortcutContext.WindowShortcut)
 		self._shortcut_toggle_measure.setAutoRepeat(False)
 		self._shortcut_toggle_grid.setAutoRepeat(False)
+		self._shortcut_toggle_fan_focus.setAutoRepeat(False)
 		self._shortcut_toggle_play.setAutoRepeat(False)
+		self._resize_sync_timer = QTimer(self)
+		self._resize_sync_timer.setSingleShot(True)
+		self._resize_sync_timer.setInterval(120)
+		self._resize_sync_timer.timeout.connect(self._on_resize_sync_timeout)
 		app = QApplication.instance()
 		if app is not None:
 			app.installEventFilter(self)
@@ -147,6 +157,7 @@ class MainWindow(QMainWindow):
 		self._build_layout()
 		self._wire_signals()
 		self._controller.state_changed.emit(self._controller.state())
+		QTimer.singleShot(0, self._sync_cartesian_render_target_initial)
 
 	def _build_layout(self) -> None:
 		root = QWidget(self)
@@ -188,6 +199,7 @@ class MainWindow(QMainWindow):
 		transport.addWidget(QLabel("Timeline:"))
 		transport.addWidget(self._timeline, stretch=1)
 		transport.addWidget(self._grid_toggle_btn)
+		transport.addWidget(self._fan_focus_btn)
 		transport.addWidget(self._annotator_btn)
 		transport.addWidget(self._measure_mode_btn)
 		transport.addWidget(self._clear_measure_btn)
@@ -209,6 +221,7 @@ class MainWindow(QMainWindow):
 		self._speed_combo.currentTextChanged.connect(self._on_speed_changed)
 		self._timeline.valueChanged.connect(self._controller.set_ping_index)
 		self._grid_toggle_btn.toggled.connect(self._on_grid_toggled)
+		self._fan_focus_btn.toggled.connect(self._on_fan_focus_toggled)
 		self._annotator_btn.clicked.connect(self._on_annotator_clicked)
 		self._measure_mode_btn.toggled.connect(self._on_measure_mode_toggled)
 		self._clear_measure_btn.clicked.connect(self._clear_measurement)
@@ -223,6 +236,8 @@ class MainWindow(QMainWindow):
 		self._shortcut_toggle_measure.activatedAmbiguously.connect(self._toggle_measure_mode)
 		self._shortcut_toggle_grid.activated.connect(self._toggle_grid_mode)
 		self._shortcut_toggle_grid.activatedAmbiguously.connect(self._toggle_grid_mode)
+		self._shortcut_toggle_fan_focus.activated.connect(self._toggle_fan_focus)
+		self._shortcut_toggle_fan_focus.activatedAmbiguously.connect(self._toggle_fan_focus)
 		self._shortcut_toggle_play.activated.connect(self._controller.toggle_play)
 		self._shortcut_toggle_play.activatedAmbiguously.connect(self._controller.toggle_play)
 		self._shortcut_step_back.activated.connect(self._controller.step_back)
@@ -286,6 +301,17 @@ class MainWindow(QMainWindow):
 
 	def _toggle_grid_mode(self) -> None:
 		self._grid_toggle_btn.toggle()
+
+	def _on_fan_focus_toggled(self, checked: bool) -> None:
+		focus_enabled = bool(checked)
+		self._fan_focus_btn.setText("Fan Focus: On [F]" if focus_enabled else "Fan Focus: Off [F]")
+		self._polar_view.setVisible(not focus_enabled)
+		self._set_status("Fan focus enabled." if focus_enabled else "Fan focus disabled.")
+		QTimer.singleShot(0, self._sync_cartesian_render_target_idle)
+		self._refresh_pixmaps()
+
+	def _toggle_fan_focus(self) -> None:
+		self._fan_focus_btn.toggle()
 
 	def _toggle_measure_mode(self) -> None:
 		self._measure_mode_btn.toggle()
@@ -354,7 +380,29 @@ class MainWindow(QMainWindow):
 
 	def resizeEvent(self, event) -> None:  # type: ignore[override]
 		super().resizeEvent(event)
+		self._resize_sync_timer.start()
 		self._refresh_pixmaps()
+
+	def _sync_cartesian_render_target_initial(self) -> None:
+		self._sync_cartesian_render_target(refresh_if_paused=False)
+
+	def _sync_cartesian_render_target_idle(self) -> None:
+		self._sync_cartesian_render_target(refresh_if_paused=True)
+
+	def _on_resize_sync_timeout(self) -> None:
+		self._sync_cartesian_render_target(refresh_if_paused=True)
+
+	def _sync_cartesian_render_target(self, *, refresh_if_paused: bool) -> None:
+		view_w = max(1, int(self._cart_view.width()))
+		view_h = max(1, int(self._cart_view.height()))
+		dpr = max(1.0, float(self.devicePixelRatioF()))
+		target_w = max(1, int(round(view_w * dpr)))
+		target_h = max(1, int(round(view_h * dpr)))
+		self._controller.set_cart_render_target(
+			target_w,
+			target_h,
+			refresh_if_paused=refresh_if_paused,
+		)
 
 	def _refresh_pixmaps(self) -> None:
 		if self._polar_pixmap is not None:
