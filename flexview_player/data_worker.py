@@ -65,6 +65,11 @@ class MatlabDataWorker:
 		display_low_db: float = -90.0,
 		display_high_db: float = -30.0,
 		palette_name: str = "hot",
+		tvg_enabled: bool = False,
+		tvg_ref_range_m: float = 1.0,
+		tvg_log_slope_db_per_decade: float = 20.0,
+		tvg_linear_slope_db_per_m: float = 0.0,
+		tvg_offset_db: float = 0.0,
 	) -> RenderedFrame:
 		if self._session is None or self._reader is None:
 			raise RuntimeError("MATLAB is not connected.")
@@ -101,6 +106,11 @@ class MatlabDataWorker:
 			display_low_db=float(display_low_db),
 			display_high_db=float(display_high_db),
 			palette_name=palette_name,
+			tvg_enabled=bool(tvg_enabled),
+			tvg_ref_range_m=float(tvg_ref_range_m),
+			tvg_log_slope_db_per_decade=float(tvg_log_slope_db_per_decade),
+			tvg_linear_slope_db_per_m=float(tvg_linear_slope_db_per_m),
+			tvg_offset_db=float(tvg_offset_db),
 		)
 		if show_grid:
 			draw_polar_grid(cart_bgr, ranges, beam_angles)

@@ -12,6 +12,7 @@ SUPPORTED_PALETTES = ("hot", "inferno", "viridis", "cividis", "gray")
 AUTO_LOW_PERCENTILE = 5.0
 AUTO_HIGH_PERCENTILE = 99.0
 MIN_DISPLAY_SPAN_DB = 1.0
+TVG_MIN_REF_RANGE_M = 1e-3
 
 
 def _remap_cache_get(key: tuple) -> tuple[np.ndarray, np.ndarray] | None:
@@ -103,6 +104,23 @@ def _sanitize_display_window_db(
 	return window_low, window_high
 
 
+def _apply_tvg_db(
+	src_db: np.ndarray,
+	*,
+	ranges_m: np.ndarray,
+	ref_range_m: float,
+	log_slope_db_per_decade: float,
+	linear_slope_db_per_m: float,
+	offset_db: float,
+) -> np.ndarray:
+	ref_m = max(TVG_MIN_REF_RANGE_M, float(ref_range_m))
+	safe_ranges = np.maximum(np.asarray(ranges_m, dtype=np.float32), ref_m)
+	log_term = float(log_slope_db_per_decade) * np.log10(safe_ranges / ref_m)
+	linear_term = float(linear_slope_db_per_m) * (safe_ranges - ref_m)
+	gain_db = (float(offset_db) + log_term + linear_term).astype(np.float32)
+	return src_db + gain_db[:, None]
+
+
 def show_polar_image(image_disp: np.ndarray, window: str = "Flexview") -> None:
 	"""Display a raw polar data matrix (range vs. angle) with OpenCV."""
 	img = image_disp
@@ -125,6 +143,11 @@ def render_cartesian_image(
     palette_name: str = DEFAULT_PALETTE,
     display_floor_db: float = -120.0,
     display_ceiling_db: float = 0.0,
+    tvg_enabled: bool = False,
+    tvg_ref_range_m: float = 1.0,
+    tvg_log_slope_db_per_decade: float = 20.0,
+    tvg_linear_slope_db_per_m: float = 0.0,
+    tvg_offset_db: float = 0.0,
 ) -> np.ndarray:
     """Render polar data onto Cartesian fan using absolute dB mapping."""
     src_db = np.asarray(image_disp, dtype=np.float32)
@@ -135,6 +158,17 @@ def render_cartesian_image(
     ceiling_db = float(display_ceiling_db)
     if ceiling_db <= floor_db:
         ceiling_db = floor_db + 1.0
+    ranges_m = np.hypot(x_coords[:, 0], z_coords[:, 0]).astype(np.float32)
+    if tvg_enabled:
+        src_db = _apply_tvg_db(
+            src_db,
+            ranges_m=ranges_m,
+            ref_range_m=float(tvg_ref_range_m),
+            log_slope_db_per_decade=float(tvg_log_slope_db_per_decade),
+            linear_slope_db_per_m=float(tvg_linear_slope_db_per_m),
+            offset_db=float(tvg_offset_db),
+        )
+
     finite_src = src_db[np.isfinite(src_db)]
     if finite_src.size == 0:
         return np.zeros((100, max(1, int(output_width_px)), 3), dtype=np.uint8)
@@ -174,7 +208,7 @@ def render_cartesian_image(
     output_height_px = max(1, int(round(height_m * scale)))
 
     # Derive source polar axes.
-    ranges = np.hypot(x_coords[:, 0], z_coords[:, 0]).astype(np.float32)
+    ranges = ranges_m
     beam_angles_deg = np.rad2deg(np.arctan2(x_coords[0, :], z_coords[0, :])).astype(np.float32)
 
     # Ensure monotonic ascending interpolation axes.

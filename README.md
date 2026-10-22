@@ -59,6 +59,8 @@ py -3 -m flexview_player
 - `Auto Intensity`: automatic per-ping display windowing for quick visual review.
 - `Low dB` / `High dB`: manual display window controls (`-120 dB` to `0 dB`) when auto intensity is off.
 - `Palette`: choose `Hot`, `Inferno`, `Viridis`, `Cividis`, or `Gray` for fan and polar display.
+- `TVG`: optional range-dependent gain shaping with controls for log slope (`-20` to `60` dB/dec),
+  linear slope (`-5.0` to `5.0` dB/m), and offset (`-40` to `40` dB).
 
 ### View
 
@@ -84,9 +86,9 @@ py -3 -m flexview_player
 - Dynamic cartesian render target synced to panel size and display scale (DPI-aware).
 - Aspect-aware cartesian rendering to avoid unnecessary fan-view upscaling.
 - Display controls: auto intensity, manual dB window (`Low dB`/`High dB`), and palette selection.
+- Optional TVG gain stage applied before display windowing for far-range compensation.
 - Cursor readout in fan view (`x`, `z`, `range`, `angle`).
 - Staged measurement workflow with JSON export.
-- Follow-up TVG design note for phase 2: `TVG_PHASE2_DESIGN.md`.
 
 ## Measurement Output Files
 

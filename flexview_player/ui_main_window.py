@@ -134,6 +134,27 @@ class MainWindow(QMainWindow):
 		self._palette_combo.addItem("Cividis", "cividis")
 		self._palette_combo.addItem("Gray", "gray")
 		self._palette_combo.setCurrentIndex(0)
+		self._tvg_enabled_btn = QPushButton("TVG: Off")
+		self._tvg_enabled_btn.setCheckable(True)
+		self._tvg_enabled_btn.setChecked(False)
+		self._tvg_log_slope_label = QLabel("TVG Log: 20 dB/dec")
+		self._tvg_log_slope_slider = QSlider(Qt.Orientation.Horizontal)
+		self._tvg_log_slope_slider.setRange(-20, 60)
+		self._tvg_log_slope_slider.setSingleStep(1)
+		self._tvg_log_slope_slider.setPageStep(5)
+		self._tvg_log_slope_slider.setValue(20)
+		self._tvg_linear_slope_label = QLabel("TVG Lin: 0.0 dB/m")
+		self._tvg_linear_slope_slider = QSlider(Qt.Orientation.Horizontal)
+		self._tvg_linear_slope_slider.setRange(-50, 50)
+		self._tvg_linear_slope_slider.setSingleStep(1)
+		self._tvg_linear_slope_slider.setPageStep(5)
+		self._tvg_linear_slope_slider.setValue(0)
+		self._tvg_offset_label = QLabel("TVG Offset: 0 dB")
+		self._tvg_offset_slider = QSlider(Qt.Orientation.Horizontal)
+		self._tvg_offset_slider.setRange(-40, 40)
+		self._tvg_offset_slider.setSingleStep(1)
+		self._tvg_offset_slider.setPageStep(5)
+		self._tvg_offset_slider.setValue(0)
 		self._grid_toggle_btn = QPushButton("Grid: On [G]")
 		self._grid_toggle_btn.setCheckable(True)
 		self._grid_toggle_btn.setChecked(True)
@@ -275,6 +296,19 @@ class MainWindow(QMainWindow):
 		display_controls.addWidget(self._palette_combo)
 		root_layout.addLayout(display_controls)
 
+		tvg_controls = QHBoxLayout()
+		tvg_controls.addWidget(self._tvg_enabled_btn)
+		tvg_controls.addSpacing(8)
+		tvg_controls.addWidget(self._tvg_log_slope_label)
+		tvg_controls.addWidget(self._tvg_log_slope_slider, stretch=1)
+		tvg_controls.addSpacing(8)
+		tvg_controls.addWidget(self._tvg_linear_slope_label)
+		tvg_controls.addWidget(self._tvg_linear_slope_slider, stretch=1)
+		tvg_controls.addSpacing(8)
+		tvg_controls.addWidget(self._tvg_offset_label)
+		tvg_controls.addWidget(self._tvg_offset_slider, stretch=1)
+		root_layout.addLayout(tvg_controls)
+
 		status_bar = QStatusBar(self)
 		status_bar.addWidget(self._status_label, stretch=1)
 		self.setStatusBar(status_bar)
@@ -294,6 +328,10 @@ class MainWindow(QMainWindow):
 		self._low_db_slider.valueChanged.connect(self._on_display_low_db_changed)
 		self._high_db_slider.valueChanged.connect(self._on_display_high_db_changed)
 		self._palette_combo.currentIndexChanged.connect(self._on_palette_changed)
+		self._tvg_enabled_btn.toggled.connect(self._on_tvg_enabled_toggled)
+		self._tvg_log_slope_slider.valueChanged.connect(self._on_tvg_log_slope_changed)
+		self._tvg_linear_slope_slider.valueChanged.connect(self._on_tvg_linear_slope_changed)
+		self._tvg_offset_slider.valueChanged.connect(self._on_tvg_offset_changed)
 		self._grid_toggle_btn.toggled.connect(self._on_grid_toggled)
 		self._fan_focus_btn.toggled.connect(self._on_fan_focus_toggled)
 		self._annotator_btn.clicked.connect(self._on_annotator_clicked)
@@ -412,6 +450,43 @@ class MainWindow(QMainWindow):
 		self._controller.set_palette(palette_name)
 		self._persist_display_preferences()
 
+	def _on_tvg_enabled_toggled(self, checked: bool) -> None:
+		tvg_enabled = bool(checked)
+		self._controller.set_tvg_enabled(tvg_enabled)
+		self._set_tvg_controls_enabled(tvg_enabled)
+		self._persist_display_preferences()
+
+	def _on_tvg_log_slope_changed(self, value: int) -> None:
+		log_slope = int(np.clip(int(value), -20, 60))
+		if self._tvg_log_slope_slider.value() != log_slope:
+			self._tvg_log_slope_slider.blockSignals(True)
+			self._tvg_log_slope_slider.setValue(log_slope)
+			self._tvg_log_slope_slider.blockSignals(False)
+		self._tvg_log_slope_label.setText(f"TVG Log: {log_slope} dB/dec")
+		self._controller.set_tvg_parameters(log_slope_db_per_decade=float(log_slope))
+		self._persist_display_preferences()
+
+	def _on_tvg_linear_slope_changed(self, value: int) -> None:
+		scaled = int(np.clip(int(value), -50, 50))
+		if self._tvg_linear_slope_slider.value() != scaled:
+			self._tvg_linear_slope_slider.blockSignals(True)
+			self._tvg_linear_slope_slider.setValue(scaled)
+			self._tvg_linear_slope_slider.blockSignals(False)
+		linear_slope = float(scaled) / 10.0
+		self._tvg_linear_slope_label.setText(f"TVG Lin: {linear_slope:.1f} dB/m")
+		self._controller.set_tvg_parameters(linear_slope_db_per_m=linear_slope)
+		self._persist_display_preferences()
+
+	def _on_tvg_offset_changed(self, value: int) -> None:
+		offset_db = int(np.clip(int(value), -40, 40))
+		if self._tvg_offset_slider.value() != offset_db:
+			self._tvg_offset_slider.blockSignals(True)
+			self._tvg_offset_slider.setValue(offset_db)
+			self._tvg_offset_slider.blockSignals(False)
+		self._tvg_offset_label.setText(f"TVG Offset: {offset_db} dB")
+		self._controller.set_tvg_parameters(offset_db=float(offset_db))
+		self._persist_display_preferences()
+
 	def _toggle_grid_mode(self) -> None:
 		self._grid_toggle_btn.toggle()
 
@@ -504,7 +579,38 @@ class MainWindow(QMainWindow):
 			self._palette_combo.blockSignals(True)
 			self._palette_combo.setCurrentIndex(palette_idx)
 			self._palette_combo.blockSignals(False)
+
+		if self._tvg_enabled_btn.isChecked() != state.tvg_enabled:
+			self._tvg_enabled_btn.blockSignals(True)
+			self._tvg_enabled_btn.setChecked(state.tvg_enabled)
+			self._tvg_enabled_btn.blockSignals(False)
+		self._tvg_enabled_btn.setText("TVG: On" if state.tvg_enabled else "TVG: Off")
+
+		log_slope = int(round(float(state.tvg_log_slope_db_per_decade)))
+		if self._tvg_log_slope_slider.value() != log_slope:
+			self._tvg_log_slope_slider.blockSignals(True)
+			self._tvg_log_slope_slider.setValue(log_slope)
+			self._tvg_log_slope_slider.blockSignals(False)
+		self._tvg_log_slope_label.setText(f"TVG Log: {log_slope} dB/dec")
+
+		linear_slope_scaled = int(round(float(state.tvg_linear_slope_db_per_m) * 10.0))
+		if self._tvg_linear_slope_slider.value() != linear_slope_scaled:
+			self._tvg_linear_slope_slider.blockSignals(True)
+			self._tvg_linear_slope_slider.setValue(linear_slope_scaled)
+			self._tvg_linear_slope_slider.blockSignals(False)
+		self._tvg_linear_slope_label.setText(
+			f"TVG Lin: {float(linear_slope_scaled) / 10.0:.1f} dB/m"
+		)
+
+		offset_db = int(round(float(state.tvg_offset_db)))
+		if self._tvg_offset_slider.value() != offset_db:
+			self._tvg_offset_slider.blockSignals(True)
+			self._tvg_offset_slider.setValue(offset_db)
+			self._tvg_offset_slider.blockSignals(False)
+		self._tvg_offset_label.setText(f"TVG Offset: {offset_db} dB")
+
 		self._set_display_controls_enabled(state.auto_intensity_enabled)
+		self._set_tvg_controls_enabled(state.tvg_enabled)
 		self._play_btn.setText("Pause [Space]" if state.is_playing else "Play [Space]")
 
 	def _set_status(self, text: str) -> None:
@@ -614,17 +720,51 @@ class MainWindow(QMainWindow):
 		self._high_db_label.setEnabled(manual_enabled)
 		self._high_db_slider.setEnabled(manual_enabled)
 
+	def _set_tvg_controls_enabled(self, tvg_enabled: bool) -> None:
+		enabled = bool(tvg_enabled)
+		self._tvg_log_slope_label.setEnabled(enabled)
+		self._tvg_log_slope_slider.setEnabled(enabled)
+		self._tvg_linear_slope_label.setEnabled(enabled)
+		self._tvg_linear_slope_slider.setEnabled(enabled)
+		self._tvg_offset_label.setEnabled(enabled)
+		self._tvg_offset_slider.setEnabled(enabled)
+
 	def _persist_display_preferences(self) -> None:
 		self._settings.setValue("display/auto_intensity_enabled", self._auto_intensity_btn.isChecked())
 		self._settings.setValue("display/low_db", int(self._low_db_slider.value()))
 		self._settings.setValue("display/high_db", int(self._high_db_slider.value()))
 		self._settings.setValue("display/palette_name", self._selected_palette_name())
+		self._settings.setValue("display/tvg_enabled", self._tvg_enabled_btn.isChecked())
+		self._settings.setValue("display/tvg_log_slope_db_per_decade", int(self._tvg_log_slope_slider.value()))
+		self._settings.setValue(
+			"display/tvg_linear_slope_db_per_m",
+			float(self._tvg_linear_slope_slider.value()) / 10.0,
+		)
+		self._settings.setValue("display/tvg_offset_db", int(self._tvg_offset_slider.value()))
 
 	def _load_saved_display_preferences(self) -> None:
 		auto_enabled = self._settings.value("display/auto_intensity_enabled", True, type=bool)
 		low_db = int(self._settings.value("display/low_db", -90, type=int))
 		high_db = int(self._settings.value("display/high_db", -30, type=int))
 		palette_name = str(self._settings.value("display/palette_name", "hot", type=str) or "hot").strip()
+		tvg_enabled = self._settings.value("display/tvg_enabled", False, type=bool)
+		tvg_log_slope = int(
+			round(
+				float(
+					self._settings.value(
+						"display/tvg_log_slope_db_per_decade",
+						20.0,
+						type=float,
+					)
+				)
+			)
+		)
+		tvg_linear_slope = float(
+			self._settings.value("display/tvg_linear_slope_db_per_m", 0.0, type=float)
+		)
+		tvg_offset_db = int(
+			round(float(self._settings.value("display/tvg_offset_db", 0.0, type=float)))
+		)
 
 		low_db = int(np.clip(low_db, -120, 0))
 		high_db = int(np.clip(high_db, -120, 0))
@@ -632,6 +772,9 @@ class MainWindow(QMainWindow):
 			high_db = min(0, low_db + 1)
 			if high_db <= low_db:
 				low_db = max(-120, high_db - 1)
+		tvg_log_slope = int(np.clip(tvg_log_slope, -20, 60))
+		tvg_linear_slope = float(np.clip(tvg_linear_slope, -5.0, 5.0))
+		tvg_offset_db = int(np.clip(tvg_offset_db, -40, 40))
 
 		palette_idx = self._palette_combo.findData(palette_name.lower())
 		self._palette_combo.blockSignals(True)
@@ -651,10 +794,33 @@ class MainWindow(QMainWindow):
 		self._high_db_slider.setValue(high_db)
 		self._high_db_slider.blockSignals(False)
 		self._set_display_controls_enabled(bool(auto_enabled))
+		self._tvg_enabled_btn.blockSignals(True)
+		self._tvg_enabled_btn.setChecked(bool(tvg_enabled))
+		self._tvg_enabled_btn.blockSignals(False)
+		self._tvg_log_slope_slider.blockSignals(True)
+		self._tvg_log_slope_slider.setValue(tvg_log_slope)
+		self._tvg_log_slope_slider.blockSignals(False)
+		self._tvg_linear_slope_slider.blockSignals(True)
+		self._tvg_linear_slope_slider.setValue(int(round(tvg_linear_slope * 10.0)))
+		self._tvg_linear_slope_slider.blockSignals(False)
+		self._tvg_offset_slider.blockSignals(True)
+		self._tvg_offset_slider.setValue(tvg_offset_db)
+		self._tvg_offset_slider.blockSignals(False)
+		self._set_tvg_controls_enabled(bool(tvg_enabled))
+		self._tvg_enabled_btn.setText("TVG: On" if bool(tvg_enabled) else "TVG: Off")
+		self._tvg_log_slope_label.setText(f"TVG Log: {tvg_log_slope} dB/dec")
+		self._tvg_linear_slope_label.setText(f"TVG Lin: {tvg_linear_slope:.1f} dB/m")
+		self._tvg_offset_label.setText(f"TVG Offset: {tvg_offset_db} dB")
 
 		self._controller.set_display_window_db(low_db=float(low_db), high_db=float(high_db))
 		self._controller.set_palette(self._selected_palette_name())
 		self._controller.set_auto_intensity(bool(auto_enabled))
+		self._controller.set_tvg_parameters(
+			log_slope_db_per_decade=float(tvg_log_slope),
+			linear_slope_db_per_m=float(tvg_linear_slope),
+			offset_db=float(tvg_offset_db),
+		)
+		self._controller.set_tvg_enabled(bool(tvg_enabled))
 
 	def _load_saved_annotator(self) -> None:
 		saved_name = self._settings.value("measurement/annotator_name", "", type=str)

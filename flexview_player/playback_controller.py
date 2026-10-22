@@ -12,6 +12,14 @@ from .data_worker import MatlabDataWorker, RenderedFrame
 DISPLAY_DB_FLOOR = -120.0
 DISPLAY_DB_CEILING = 0.0
 DISPLAY_DB_MIN_SPAN = 1.0
+TVG_REF_RANGE_MIN_M = 0.1
+TVG_REF_RANGE_MAX_M = 100.0
+TVG_LOG_SLOPE_MIN = -20.0
+TVG_LOG_SLOPE_MAX = 60.0
+TVG_LINEAR_SLOPE_MIN = -5.0
+TVG_LINEAR_SLOPE_MAX = 5.0
+TVG_OFFSET_MIN = -40.0
+TVG_OFFSET_MAX = 40.0
 
 
 @dataclass
@@ -25,6 +33,11 @@ class PlayerState:
 	display_low_db: float = -90.0
 	display_high_db: float = -30.0
 	palette_name: str = "hot"
+	tvg_enabled: bool = False
+	tvg_ref_range_m: float = 1.0
+	tvg_log_slope_db_per_decade: float = 20.0
+	tvg_linear_slope_db_per_m: float = 0.0
+	tvg_offset_db: float = 0.0
 	last_loaded_ping_number: int = 0
 	discovered_max_ping_index: int = 1000
 
@@ -147,6 +160,54 @@ class PlaybackController(QObject):
 		self._state.palette_name = normalized
 		self._refresh_display_state()
 
+	def set_tvg_enabled(self, enabled: bool) -> None:
+		tvg_enabled = bool(enabled)
+		if tvg_enabled == self._state.tvg_enabled:
+			return
+		self._state.tvg_enabled = tvg_enabled
+		self._refresh_display_state()
+
+	def set_tvg_parameters(
+		self,
+		*,
+		ref_range_m: float | None = None,
+		log_slope_db_per_decade: float | None = None,
+		linear_slope_db_per_m: float | None = None,
+		offset_db: float | None = None,
+	) -> None:
+		ref_range = (
+			self._state.tvg_ref_range_m if ref_range_m is None else float(ref_range_m)
+		)
+		log_slope = (
+			self._state.tvg_log_slope_db_per_decade
+			if log_slope_db_per_decade is None
+			else float(log_slope_db_per_decade)
+		)
+		linear_slope = (
+			self._state.tvg_linear_slope_db_per_m
+			if linear_slope_db_per_m is None
+			else float(linear_slope_db_per_m)
+		)
+		offset = self._state.tvg_offset_db if offset_db is None else float(offset_db)
+		ref_range, log_slope, linear_slope, offset = self._clamp_tvg_parameters(
+			ref_range=ref_range,
+			log_slope=log_slope,
+			linear_slope=linear_slope,
+			offset=offset,
+		)
+		if (
+			abs(ref_range - self._state.tvg_ref_range_m) < 1e-6
+			and abs(log_slope - self._state.tvg_log_slope_db_per_decade) < 1e-6
+			and abs(linear_slope - self._state.tvg_linear_slope_db_per_m) < 1e-6
+			and abs(offset - self._state.tvg_offset_db) < 1e-6
+		):
+			return
+		self._state.tvg_ref_range_m = ref_range
+		self._state.tvg_log_slope_db_per_decade = log_slope
+		self._state.tvg_linear_slope_db_per_m = linear_slope
+		self._state.tvg_offset_db = offset
+		self._refresh_display_state()
+
 	def set_cart_render_target(
 		self,
 		width_px: int,
@@ -192,6 +253,11 @@ class PlaybackController(QObject):
 				display_low_db=self._state.display_low_db,
 				display_high_db=self._state.display_high_db,
 				palette_name=self._state.palette_name,
+				tvg_enabled=self._state.tvg_enabled,
+				tvg_ref_range_m=self._state.tvg_ref_range_m,
+				tvg_log_slope_db_per_decade=self._state.tvg_log_slope_db_per_decade,
+				tvg_linear_slope_db_per_m=self._state.tvg_linear_slope_db_per_m,
+				tvg_offset_db=self._state.tvg_offset_db,
 			)
 		except Exception as exc:
 			if ping_index > self._state.current_ping_index:
@@ -269,3 +335,24 @@ class PlaybackController(QObject):
 			high_clamped = ceiling
 			low_clamped = ceiling - min_span
 		return low_clamped, high_clamped
+
+	@staticmethod
+	def _clamp_tvg_parameters(
+		*,
+		ref_range: float,
+		log_slope: float,
+		linear_slope: float,
+		offset: float,
+	) -> tuple[float, float, float, float]:
+		ref_range_clamped = min(TVG_REF_RANGE_MAX_M, max(TVG_REF_RANGE_MIN_M, float(ref_range)))
+		log_slope_clamped = min(TVG_LOG_SLOPE_MAX, max(TVG_LOG_SLOPE_MIN, float(log_slope)))
+		linear_slope_clamped = min(
+			TVG_LINEAR_SLOPE_MAX, max(TVG_LINEAR_SLOPE_MIN, float(linear_slope))
+		)
+		offset_clamped = min(TVG_OFFSET_MAX, max(TVG_OFFSET_MIN, float(offset)))
+		return (
+			ref_range_clamped,
+			log_slope_clamped,
+			linear_slope_clamped,
+			offset_clamped,
+		)
