@@ -29,6 +29,7 @@ ZOOM_SCALE_MAX = 8.0
 class PlayerState:
 	file_path: str = ""
 	connected: bool = False
+	decoder_backend: str = "python"
 	is_playing: bool = False
 	current_ping_index: int = 0
 	playback_rate: float = 1.0
@@ -74,7 +75,8 @@ class PlaybackController(QObject):
 		try:
 			self._worker.connect()
 			self._state.connected = True
-			self._emit_state("Connected to MATLAB.")
+			self._state.decoder_backend = "matlab"
+			self._emit_state("Connected to MATLAB. Decoder switched to MATLAB.")
 			if self._state.file_path:
 				self._load_frame(self._state.current_ping_index, status=False)
 		except Exception as exc:  # pragma: no cover
@@ -85,7 +87,10 @@ class PlaybackController(QObject):
 		self._worker.disconnect()
 		self._state.connected = False
 		self._state.is_playing = False
-		self._emit_state("Disconnected from MATLAB.")
+		self._state.decoder_backend = "python"
+		self._emit_state("Disconnected from MATLAB. Decoder switched to Python.")
+		if self._state.file_path:
+			self._load_frame(self._state.current_ping_index, status=False)
 
 	def open_imb_file(self, file_path: str) -> None:
 		path = Path(file_path)
@@ -102,15 +107,15 @@ class PlaybackController(QObject):
 		self._state.zoom_center_x_m = float("nan")
 		self._state.zoom_center_z_m = float("nan")
 		self._emit_state(f"Loaded file: {self._state.file_path}")
-		if self._state.connected:
+		if self._decoder_ready():
 			self._load_frame(0, status=True)
 
 	def toggle_play(self) -> None:
 		if not self._state.file_path:
 			self._emit_state("Load an .imb or .mmb file first.")
 			return
-		if not self._state.connected:
-			self._emit_state("Connect MATLAB first.")
+		if not self._decoder_ready():
+			self._emit_state("Connect MATLAB first or switch back to Python decoder.")
 			return
 		self._state.is_playing = not self._state.is_playing
 		if self._state.is_playing:
@@ -283,7 +288,7 @@ class PlaybackController(QObject):
 		self._cart_render_height_px = target_h
 		if (
 			refresh_if_paused
-			and self._state.connected
+			and self._decoder_ready()
 			and bool(self._state.file_path)
 			and not self._state.is_playing
 		):
@@ -294,15 +299,16 @@ class PlaybackController(QObject):
 			if status:
 				self._emit_state("Load an .imb or .mmb file first.")
 			return False
-		if not self._state.connected:
+		if not self._decoder_ready():
 			if status:
-				self._emit_state("Connect MATLAB first.")
+				self._emit_state("Connect MATLAB first or switch back to Python decoder.")
 			return False
 
 		try:
 			frame: RenderedFrame = self._worker.load_imb_frame(
 				self._state.file_path,
 				ping_index,
+				decoder_backend=self._state.decoder_backend,
 				cart_width_px=self._cart_render_width_px,
 				cart_height_px=self._cart_render_height_px,
 				show_grid=self._show_grid,
@@ -372,8 +378,13 @@ class PlaybackController(QObject):
 
 	def _refresh_display_state(self) -> None:
 		self.state_changed.emit(self.state())
-		if self._state.connected and bool(self._state.file_path) and not self._state.is_playing:
+		if self._decoder_ready() and bool(self._state.file_path) and not self._state.is_playing:
 			self._load_frame(self._state.current_ping_index, status=False)
+
+	def _decoder_ready(self) -> bool:
+		if self._state.decoder_backend == "python":
+			return True
+		return bool(self._state.connected)
 
 	@staticmethod
 	def _clamp_display_window_db(low: float, high: float) -> tuple[float, float]:

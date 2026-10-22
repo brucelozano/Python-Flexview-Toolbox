@@ -15,6 +15,7 @@ from flexview_py.geometry import compute_rangelist_from_header, magnitude_db, po
 from flexview_py.imb_reader import IMBReader
 from flexview_py.mmb_reader import MMBReader
 from flexview_py.matlab_bridge import MatlabSession
+from flexview_py.native_flexview_reader import NativeFlexviewReader
 
 
 @dataclass
@@ -35,17 +36,18 @@ class RenderedFrame:
 
 
 class MatlabDataWorker:
-	"""Thin sync worker for MATLAB session lifecycle (Milestone 1).
-
-	Threaded decoding/prefetch will be added in later milestones.
-	"""
+	"""Data worker with Python-native and optional MATLAB decode backends."""
 
 	def __init__(self) -> None:
 		self._session: Optional[MatlabSession] = None
 		self._imb_reader: Optional[IMBReader] = None
 		self._mmb_reader: Optional[MMBReader] = None
-		self._decoded_cache: dict[tuple[str, int], tuple[dict, np.ndarray, np.ndarray, np.ndarray, int]] = {}
-		self._decoded_cache_order: list[tuple[str, int]] = []
+		self._native_readers: dict[str, NativeFlexviewReader] = {}
+		self._decoded_cache: dict[
+			tuple[str, int, str],
+			tuple[dict, np.ndarray, np.ndarray, np.ndarray, int],
+		] = {}
+		self._decoded_cache_order: list[tuple[str, int, str]] = []
 		self._decoded_cache_max = 8
 
 	@property
@@ -72,6 +74,7 @@ class MatlabDataWorker:
 		self,
 		file_path: str,
 		ping_index: int,
+		decoder_backend: str = "python",
 		cart_width_px: int = 900,
 		cart_height_px: int = 700,
 		show_grid: bool = True,
@@ -89,12 +92,16 @@ class MatlabDataWorker:
 		zoom_center_x_m: float = float("nan"),
 		zoom_center_z_m: float = float("nan"),
 	) -> RenderedFrame:
-		if self._session is None or self._imb_reader is None or self._mmb_reader is None:
-			raise RuntimeError("MATLAB is not connected.")
+		backend = "matlab" if str(decoder_backend).strip().lower() == "matlab" else "python"
+		if backend == "matlab" and (
+			self._session is None or self._imb_reader is None or self._mmb_reader is None
+		):
+			raise RuntimeError("MATLAB decoder requested but MATLAB is not connected.")
 
 		header, beam_angles, image, ranges, effective_ping_index = self._load_decoded_frame(
 			file_path=file_path,
 			ping_index=ping_index,
+			decoder_backend=backend,
 		)
 
 		# Polar image rendering (range x beam).
@@ -169,8 +176,11 @@ class MatlabDataWorker:
 		*,
 		file_path: str,
 		ping_index: int,
+		decoder_backend: str,
 	) -> tuple[dict, np.ndarray, np.ndarray, np.ndarray, int]:
-		cache_key = (str(file_path), int(ping_index))
+		backend = "matlab" if str(decoder_backend).strip().lower() == "matlab" else "python"
+		file_key = str(Path(file_path).resolve())
+		cache_key = (file_key, int(ping_index), backend)
 		cached = self._decoded_cache_get(cache_key)
 		if cached is not None:
 			header, beam_angles, image, ranges, effective_ping_index = cached
@@ -183,22 +193,28 @@ class MatlabDataWorker:
 			)
 
 		ext = Path(file_path).suffix.lower()
-		if ext == ".imb":
-			header, beam_angles, image = self._imb_reader.load_frame(file_path, ping_index)
-			ranges = compute_rangelist_from_header(header)
-			effective_ping_index = int(ping_index)
-		elif ext == ".mmb":
-			header, beam_angles, image = self._mmb_reader.load_frame(file_path, ping_index)
-			ranges = self._mmb_reader.last_range_list_m
-			if ranges is None or ranges.size == 0:
-				raise RuntimeError("MMB beamforming returned an empty range list.")
-			effective_ping_index = (
-				int(self._mmb_reader.last_actual_ping_index)
-				if self._mmb_reader.last_actual_ping_index is not None
-				else int(ping_index)
-			)
+		if backend == "matlab":
+			if ext == ".imb":
+				header, beam_angles, image = self._imb_reader.load_frame(file_path, ping_index)
+				ranges = compute_rangelist_from_header(header)
+				effective_ping_index = int(ping_index)
+			elif ext == ".mmb":
+				header, beam_angles, image = self._mmb_reader.load_frame(file_path, ping_index)
+				ranges = self._mmb_reader.last_range_list_m
+				if ranges is None or ranges.size == 0:
+					raise RuntimeError("MMB beamforming returned an empty range list.")
+				effective_ping_index = (
+					int(self._mmb_reader.last_actual_ping_index)
+					if self._mmb_reader.last_actual_ping_index is not None
+					else int(ping_index)
+				)
+			else:
+				raise RuntimeError(f"Unsupported file type: {ext}")
 		else:
-			raise RuntimeError(f"Unsupported file type: {ext}")
+			header, beam_angles, image, ranges, effective_ping_index = self._load_native_frame(
+				file_path=file_key,
+				ping_index=ping_index,
+			)
 
 		header_dict = dict(header) if isinstance(header, dict) else {}
 		beam_angles_arr = np.asarray(beam_angles, dtype=np.float32).ravel()
@@ -210,9 +226,29 @@ class MatlabDataWorker:
 		)
 		return header_dict, beam_angles_arr, image_arr, ranges_arr, int(effective_ping_index)
 
+	def _load_native_frame(
+		self,
+		*,
+		file_path: str,
+		ping_index: int,
+	) -> tuple[dict, np.ndarray, np.ndarray, np.ndarray, int]:
+		native_key = str(Path(file_path).resolve())
+		reader = self._native_readers.get(native_key)
+		if reader is None:
+			reader = NativeFlexviewReader(native_key)
+			self._native_readers[native_key] = reader
+		frame = reader.load_frame(int(ping_index))
+		return (
+			dict(frame.header),
+			frame.beam_angles_deg,
+			frame.image,
+			frame.ranges_m,
+			int(frame.ping_index),
+		)
+
 	def _decoded_cache_get(
 		self,
-		key: tuple[str, int],
+		key: tuple[str, int, str],
 	) -> tuple[dict, np.ndarray, np.ndarray, np.ndarray, int] | None:
 		value = self._decoded_cache.get(key)
 		if value is None:
@@ -226,7 +262,7 @@ class MatlabDataWorker:
 
 	def _decoded_cache_put(
 		self,
-		key: tuple[str, int],
+		key: tuple[str, int, str],
 		value: tuple[dict, np.ndarray, np.ndarray, np.ndarray, int],
 	) -> None:
 		if key not in self._decoded_cache:

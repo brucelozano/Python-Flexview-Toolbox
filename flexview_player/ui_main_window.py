@@ -95,7 +95,7 @@ class MainWindow(QMainWindow):
 		self.resize(1200, 760)
 
 		self._status_label = QLabel("Status: Ready")
-		self._connected_label = QLabel("MATLAB: Disconnected")
+		self._connected_label = QLabel("Decoder: Python | MATLAB: Disconnected")
 		self._file_label = QLabel("(none)")
 		self._file_label.setWordWrap(True)
 		self._meta_label = QLabel("Index: - | Ping: - | Size: - | Beam: - | Range: -")
@@ -106,9 +106,9 @@ class MainWindow(QMainWindow):
 		)
 		self._measurement_label.setWordWrap(True)
 
-		self._open_btn = QPushButton("Open .imb")
-		self._connect_btn = QPushButton("Connect MATLAB")
-		self._disconnect_btn = QPushButton("Disconnect")
+		self._open_btn = QPushButton("Open .imb/.mmb")
+		self._connect_btn = QPushButton("Connect MATLAB (Use MATLAB Decoder)")
+		self._disconnect_btn = QPushButton("Use Python Decoder")
 
 		self._play_btn = QPushButton("Play/Pause [Space]")
 		self._step_back_btn = QPushButton("Previous [Left]")
@@ -597,7 +597,12 @@ class MainWindow(QMainWindow):
 
 	def _apply_state(self, state_obj: object) -> None:
 		state = state_obj if isinstance(state_obj, PlayerState) else self._controller.state()
-		self._connected_label.setText("MATLAB: Connected" if state.connected else "MATLAB: Disconnected")
+		decoder_name = "MATLAB" if state.decoder_backend == "matlab" else "Python"
+		self._connected_label.setText(
+			f"Decoder: {decoder_name} | MATLAB: {'Connected' if state.connected else 'Disconnected'}"
+		)
+		self._connect_btn.setEnabled(not state.connected)
+		self._disconnect_btn.setEnabled(state.decoder_backend == "matlab" or state.connected)
 		if state.file_path:
 			file_path = Path(state.file_path)
 			parent_name = file_path.parent.name

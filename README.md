@@ -1,7 +1,7 @@
-# Flexview Player (Python + MATLAB Engine)
+# Flexview Player (Python + Optional MATLAB Engine)
 
 This project is focused on a Python player and annotation tool for Flexview IMB/MMB data.
-MATLAB Engine is used for data decoding, and Python handles playback UI, rendering, and exports.
+Python-native decoding is the default path; MATLAB Engine is optional for cross-checking and parity workflows.
 
 If you only need one command to get started:
 
@@ -15,6 +15,10 @@ Current player scope: `.imb` and `.mmb` files (`.mmb` uses default `image_index=
 
 ### 1) Prerequisites
 
+- Python 3.9+ recommended.
+
+Optional (only if you want MATLAB decoder / parity checks):
+
 - MATLAB installed locally.
 - MATLAB Engine for Python installed from the same MATLAB version:
 
@@ -22,8 +26,6 @@ Current player scope: `.imb` and `.mmb` files (`.mmb` uses default `image_index=
 cd(fullfile(matlabroot,'extern','engines','python'));
 system('py -3 -m pip install .');
 ```
-
-- Python 3.9+ recommended.
 
 ### 2) Install dependencies
 
@@ -41,8 +43,9 @@ py -3 -m flexview_player
 
 ## Player Workflow
 
-1. Click `Connect MATLAB`.
-2. Click `Open` and choose an `.imb` or `.mmb` file.
+1. Click `Open` and choose an `.imb` or `.mmb` file.
+2. Playback uses the Python decoder by default.
+3. Optional: click `Connect MATLAB (Use MATLAB Decoder)` to switch decoding to MATLAB for verification.
 3. Navigate pings with play/pause, step buttons, timeline, and ping index spinner.
 4. Toggle `Grid` and `Fan Focus` as needed while reviewing the fan view.
 5. Use measurement mode to stage and save distances on the fan view.
@@ -79,7 +82,8 @@ py -3 -m flexview_player
 
 ## Features
 
-- MATLAB connect/disconnect from the UI.
+- Python decoder is default for `.imb` / `.mmb`.
+- Optional MATLAB connect/disconnect from the UI for decoder switching/parity checks.
 - `.imb` / `.mmb` file open + ping-by-ping playback.
 - `.mmb` MVP path uses MATLAB beamforming per ping with default `image_index=0`.
 - End-of-file handling while stepping/playing.
