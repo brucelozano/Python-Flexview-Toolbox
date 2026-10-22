@@ -3,11 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-import cv2
 import numpy as np
 
-from flexview_py.display import draw_polar_grid, render_cartesian_image
-from flexview_py.geometry import compute_rangelist_from_header, magnitude_log10, polar_to_cartesian
+from flexview_py.display import apply_palette, draw_polar_grid, render_cartesian_image
+from flexview_py.geometry import compute_rangelist_from_header, magnitude_db, polar_to_cartesian
 from flexview_py.imb_reader import IMBReader
 from flexview_py.matlab_bridge import MatlabSession
 
@@ -62,6 +61,10 @@ class MatlabDataWorker:
 		cart_width_px: int = 900,
 		cart_height_px: int = 700,
 		show_grid: bool = True,
+		auto_intensity_enabled: bool = True,
+		display_low_db: float = -90.0,
+		display_high_db: float = -30.0,
+		palette_name: str = "hot",
 	) -> RenderedFrame:
 		if self._session is None or self._reader is None:
 			raise RuntimeError("MATLAB is not connected.")
@@ -75,7 +78,7 @@ class MatlabDataWorker:
 		if np.max(polar_norm) > 0:
 			polar_norm = polar_norm / np.max(polar_norm)
 		polar_u8 = (polar_norm * 255.0).astype(np.uint8)
-		polar_bgr = cv2.applyColorMap(polar_u8, cv2.COLORMAP_INFERNO)
+		polar_bgr = apply_palette(polar_u8, palette_name)
 
 		# Cartesian fan rendering.
 		x_coords, z_coords = polar_to_cartesian(ranges, beam_angles)
@@ -90,7 +93,14 @@ class MatlabDataWorker:
 			int(round(cart_target_height * cart_aspect)),
 		)
 		cart_bgr = render_cartesian_image(
-			magnitude_log10(image), x_coords, z_coords, output_width_px=cart_render_width_px
+			magnitude_db(image),
+			x_coords,
+			z_coords,
+			output_width_px=cart_render_width_px,
+			auto_intensity_enabled=bool(auto_intensity_enabled),
+			display_low_db=float(display_low_db),
+			display_high_db=float(display_high_db),
+			palette_name=palette_name,
 		)
 		if show_grid:
 			draw_polar_grid(cart_bgr, ranges, beam_angles)

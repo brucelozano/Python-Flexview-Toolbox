@@ -56,6 +56,9 @@ py -3 -m flexview_player
 - `Next [Right]`: load next ping.
 - `Ping` spinner and `Timeline` slider: jump to any ping index.
 - `Speed`: `0.25x`, `0.5x`, `1.0x`, `2.0x`.
+- `Auto Intensity`: automatic per-ping display windowing for quick visual review.
+- `Low dB` / `High dB`: manual display window controls (`-120 dB` to `0 dB`) when auto intensity is off.
+- `Palette`: choose `Hot`, `Inferno`, `Viridis`, `Cividis`, or `Gray` for fan and polar display.
 
 ### View
 
@@ -80,8 +83,10 @@ py -3 -m flexview_player
 - Fan Focus mode (`F`) to prioritize cartesian fan inspection.
 - Dynamic cartesian render target synced to panel size and display scale (DPI-aware).
 - Aspect-aware cartesian rendering to avoid unnecessary fan-view upscaling.
+- Display controls: auto intensity, manual dB window (`Low dB`/`High dB`), and palette selection.
 - Cursor readout in fan view (`x`, `z`, `range`, `angle`).
 - Staged measurement workflow with JSON export.
+- Follow-up TVG design note for phase 2: `TVG_PHASE2_DESIGN.md`.
 
 ## Measurement Output Files
 

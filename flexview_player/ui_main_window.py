@@ -111,6 +111,29 @@ class MainWindow(QMainWindow):
 		self._timeline = QSlider(Qt.Orientation.Horizontal)
 		self._timeline.setRange(0, 1000)
 		self._timeline.setSingleStep(1)
+		self._auto_intensity_btn = QPushButton("Auto Intensity: On")
+		self._auto_intensity_btn.setCheckable(True)
+		self._auto_intensity_btn.setChecked(True)
+		self._low_db_label = QLabel("Low dB: -90")
+		self._low_db_slider = QSlider(Qt.Orientation.Horizontal)
+		self._low_db_slider.setRange(-120, 0)
+		self._low_db_slider.setSingleStep(1)
+		self._low_db_slider.setPageStep(10)
+		self._low_db_slider.setValue(-90)
+		self._high_db_label = QLabel("High dB: -30")
+		self._high_db_slider = QSlider(Qt.Orientation.Horizontal)
+		self._high_db_slider.setRange(-120, 0)
+		self._high_db_slider.setSingleStep(1)
+		self._high_db_slider.setPageStep(10)
+		self._high_db_slider.setValue(-30)
+		self._palette_label = QLabel("Palette:")
+		self._palette_combo = QComboBox()
+		self._palette_combo.addItem("Hot", "hot")
+		self._palette_combo.addItem("Inferno", "inferno")
+		self._palette_combo.addItem("Viridis", "viridis")
+		self._palette_combo.addItem("Cividis", "cividis")
+		self._palette_combo.addItem("Gray", "gray")
+		self._palette_combo.setCurrentIndex(0)
 		self._grid_toggle_btn = QPushButton("Grid: On [G]")
 		self._grid_toggle_btn.setCheckable(True)
 		self._grid_toggle_btn.setChecked(True)
@@ -160,6 +183,7 @@ class MainWindow(QMainWindow):
 
 		self._build_layout()
 		self._wire_signals()
+		self._load_saved_display_preferences()
 		self._controller.state_changed.emit(self._controller.state())
 		QTimer.singleShot(0, self._sync_cartesian_render_target_initial)
 
@@ -238,6 +262,19 @@ class MainWindow(QMainWindow):
 		transport.addWidget(self._clear_measure_btn)
 		root_layout.addLayout(transport)
 
+		display_controls = QHBoxLayout()
+		display_controls.addWidget(self._auto_intensity_btn)
+		display_controls.addSpacing(8)
+		display_controls.addWidget(self._low_db_label)
+		display_controls.addWidget(self._low_db_slider, stretch=1)
+		display_controls.addSpacing(8)
+		display_controls.addWidget(self._high_db_label)
+		display_controls.addWidget(self._high_db_slider, stretch=1)
+		display_controls.addSpacing(8)
+		display_controls.addWidget(self._palette_label)
+		display_controls.addWidget(self._palette_combo)
+		root_layout.addLayout(display_controls)
+
 		status_bar = QStatusBar(self)
 		status_bar.addWidget(self._status_label, stretch=1)
 		self.setStatusBar(status_bar)
@@ -253,6 +290,10 @@ class MainWindow(QMainWindow):
 		self._ping_spin.valueChanged.connect(self._controller.set_ping_index)
 		self._speed_combo.currentTextChanged.connect(self._on_speed_changed)
 		self._timeline.valueChanged.connect(self._controller.set_ping_index)
+		self._auto_intensity_btn.toggled.connect(self._on_auto_intensity_toggled)
+		self._low_db_slider.valueChanged.connect(self._on_display_low_db_changed)
+		self._high_db_slider.valueChanged.connect(self._on_display_high_db_changed)
+		self._palette_combo.currentIndexChanged.connect(self._on_palette_changed)
 		self._grid_toggle_btn.toggled.connect(self._on_grid_toggled)
 		self._fan_focus_btn.toggled.connect(self._on_fan_focus_toggled)
 		self._annotator_btn.clicked.connect(self._on_annotator_clicked)
@@ -332,6 +373,45 @@ class MainWindow(QMainWindow):
 			self._controller.set_ping_index(state.current_ping_index)
 		self._set_status("Fan grid enabled." if enabled else "Fan grid disabled.")
 
+	def _on_auto_intensity_toggled(self, checked: bool) -> None:
+		auto_enabled = bool(checked)
+		self._controller.set_auto_intensity(auto_enabled)
+		self._set_display_controls_enabled(auto_enabled)
+		self._persist_display_preferences()
+
+	def _on_display_low_db_changed(self, value: int) -> None:
+		low_db = int(np.clip(int(value), -120, 0))
+		high_db = int(self._high_db_slider.value())
+		if low_db >= high_db:
+			low_db = high_db - 1
+		low_db = int(np.clip(low_db, -120, 0))
+		if self._low_db_slider.value() != low_db:
+			self._low_db_slider.blockSignals(True)
+			self._low_db_slider.setValue(low_db)
+			self._low_db_slider.blockSignals(False)
+		self._low_db_label.setText(f"Low dB: {low_db}")
+		self._controller.set_display_window_db(low_db=float(low_db))
+		self._persist_display_preferences()
+
+	def _on_display_high_db_changed(self, value: int) -> None:
+		high_db = int(np.clip(int(value), -120, 0))
+		low_db = int(self._low_db_slider.value())
+		if high_db <= low_db:
+			high_db = low_db + 1
+		high_db = int(np.clip(high_db, -120, 0))
+		if self._high_db_slider.value() != high_db:
+			self._high_db_slider.blockSignals(True)
+			self._high_db_slider.setValue(high_db)
+			self._high_db_slider.blockSignals(False)
+		self._high_db_label.setText(f"High dB: {high_db}")
+		self._controller.set_display_window_db(high_db=float(high_db))
+		self._persist_display_preferences()
+
+	def _on_palette_changed(self, _: int) -> None:
+		palette_name = self._selected_palette_name()
+		self._controller.set_palette(palette_name)
+		self._persist_display_preferences()
+
 	def _toggle_grid_mode(self) -> None:
 		self._grid_toggle_btn.toggle()
 
@@ -398,6 +478,33 @@ class MainWindow(QMainWindow):
 		self._timeline.setMaximum(max(1, state.discovered_max_ping_index))
 		self._timeline.setValue(state.current_ping_index)
 		self._timeline.blockSignals(False)
+		if self._auto_intensity_btn.isChecked() != state.auto_intensity_enabled:
+			self._auto_intensity_btn.blockSignals(True)
+			self._auto_intensity_btn.setChecked(state.auto_intensity_enabled)
+			self._auto_intensity_btn.blockSignals(False)
+		self._auto_intensity_btn.setText(
+			"Auto Intensity: On" if state.auto_intensity_enabled else "Auto Intensity: Off"
+		)
+
+		low_db = int(round(float(state.display_low_db)))
+		high_db = int(round(float(state.display_high_db)))
+		if self._low_db_slider.value() != low_db:
+			self._low_db_slider.blockSignals(True)
+			self._low_db_slider.setValue(low_db)
+			self._low_db_slider.blockSignals(False)
+		if self._high_db_slider.value() != high_db:
+			self._high_db_slider.blockSignals(True)
+			self._high_db_slider.setValue(high_db)
+			self._high_db_slider.blockSignals(False)
+		self._low_db_label.setText(f"Low dB: {low_db}")
+		self._high_db_label.setText(f"High dB: {high_db}")
+
+		palette_idx = self._palette_combo.findData(state.palette_name)
+		if palette_idx >= 0 and self._palette_combo.currentIndex() != palette_idx:
+			self._palette_combo.blockSignals(True)
+			self._palette_combo.setCurrentIndex(palette_idx)
+			self._palette_combo.blockSignals(False)
+		self._set_display_controls_enabled(state.auto_intensity_enabled)
 		self._play_btn.setText("Pause [Space]" if state.is_playing else "Play [Space]")
 
 	def _set_status(self, text: str) -> None:
@@ -493,6 +600,61 @@ class MainWindow(QMainWindow):
 	def _reset_measurement_state(self) -> None:
 		self._measure_current_points_px.clear()
 		self._staged_measurements.clear()
+
+	def _selected_palette_name(self) -> str:
+		selected = self._palette_combo.currentData()
+		if isinstance(selected, str) and selected:
+			return selected
+		return "hot"
+
+	def _set_display_controls_enabled(self, auto_intensity_enabled: bool) -> None:
+		manual_enabled = not bool(auto_intensity_enabled)
+		self._low_db_label.setEnabled(manual_enabled)
+		self._low_db_slider.setEnabled(manual_enabled)
+		self._high_db_label.setEnabled(manual_enabled)
+		self._high_db_slider.setEnabled(manual_enabled)
+
+	def _persist_display_preferences(self) -> None:
+		self._settings.setValue("display/auto_intensity_enabled", self._auto_intensity_btn.isChecked())
+		self._settings.setValue("display/low_db", int(self._low_db_slider.value()))
+		self._settings.setValue("display/high_db", int(self._high_db_slider.value()))
+		self._settings.setValue("display/palette_name", self._selected_palette_name())
+
+	def _load_saved_display_preferences(self) -> None:
+		auto_enabled = self._settings.value("display/auto_intensity_enabled", True, type=bool)
+		low_db = int(self._settings.value("display/low_db", -90, type=int))
+		high_db = int(self._settings.value("display/high_db", -30, type=int))
+		palette_name = str(self._settings.value("display/palette_name", "hot", type=str) or "hot").strip()
+
+		low_db = int(np.clip(low_db, -120, 0))
+		high_db = int(np.clip(high_db, -120, 0))
+		if high_db <= low_db:
+			high_db = min(0, low_db + 1)
+			if high_db <= low_db:
+				low_db = max(-120, high_db - 1)
+
+		palette_idx = self._palette_combo.findData(palette_name.lower())
+		self._palette_combo.blockSignals(True)
+		if palette_idx >= 0:
+			self._palette_combo.setCurrentIndex(palette_idx)
+		else:
+			self._palette_combo.setCurrentIndex(0)
+		self._palette_combo.blockSignals(False)
+
+		self._auto_intensity_btn.blockSignals(True)
+		self._auto_intensity_btn.setChecked(bool(auto_enabled))
+		self._auto_intensity_btn.blockSignals(False)
+		self._low_db_slider.blockSignals(True)
+		self._low_db_slider.setValue(low_db)
+		self._low_db_slider.blockSignals(False)
+		self._high_db_slider.blockSignals(True)
+		self._high_db_slider.setValue(high_db)
+		self._high_db_slider.blockSignals(False)
+		self._set_display_controls_enabled(bool(auto_enabled))
+
+		self._controller.set_display_window_db(low_db=float(low_db), high_db=float(high_db))
+		self._controller.set_palette(self._selected_palette_name())
+		self._controller.set_auto_intensity(bool(auto_enabled))
 
 	def _load_saved_annotator(self) -> None:
 		saved_name = self._settings.value("measurement/annotator_name", "", type=str)

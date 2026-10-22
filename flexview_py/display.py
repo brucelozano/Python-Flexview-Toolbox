@@ -7,6 +7,11 @@ _REMAP_CACHE_MAX = 8
 _REMAP_CACHE: dict[tuple, tuple[np.ndarray, np.ndarray]] = {}
 _REMAP_CACHE_ORDER: list[tuple] = []
 _HOT_LUT: np.ndarray | None = None
+DEFAULT_PALETTE = "hot"
+SUPPORTED_PALETTES = ("hot", "inferno", "viridis", "cividis", "gray")
+AUTO_LOW_PERCENTILE = 5.0
+AUTO_HIGH_PERCENTILE = 99.0
+MIN_DISPLAY_SPAN_DB = 1.0
 
 
 def _remap_cache_get(key: tuple) -> tuple[np.ndarray, np.ndarray] | None:
@@ -51,6 +56,53 @@ def _hot_colormap(image_u8: np.ndarray) -> np.ndarray:
 	return cv2.applyColorMap(image_u8, cv2.COLORMAP_HOT)
 
 
+def normalize_palette_name(palette_name: str) -> str:
+	name = str(palette_name).strip().lower()
+	if name in SUPPORTED_PALETTES:
+		return name
+	return DEFAULT_PALETTE
+
+
+def apply_palette(image_u8: np.ndarray, palette_name: str) -> np.ndarray:
+	palette = normalize_palette_name(palette_name)
+	if palette == "gray":
+		return cv2.cvtColor(image_u8, cv2.COLOR_GRAY2BGR)
+	if palette == "hot":
+		return _hot_colormap(image_u8)
+
+	colormap_by_name = {
+		"inferno": cv2.COLORMAP_INFERNO,
+		"viridis": getattr(cv2, "COLORMAP_VIRIDIS", cv2.COLORMAP_HOT),
+		"cividis": getattr(cv2, "COLORMAP_CIVIDIS", cv2.COLORMAP_HOT),
+	}
+	colormap = colormap_by_name.get(palette, cv2.COLORMAP_HOT)
+	return cv2.applyColorMap(image_u8, colormap)
+
+
+def _sanitize_display_window_db(
+	*,
+	low_db: float,
+	high_db: float,
+	floor_db: float,
+	ceiling_db: float,
+) -> tuple[float, float]:
+	window_low = min(ceiling_db - MIN_DISPLAY_SPAN_DB, max(floor_db, float(low_db)))
+	window_high = min(ceiling_db, max(floor_db + MIN_DISPLAY_SPAN_DB, float(high_db)))
+	if window_high - window_low >= MIN_DISPLAY_SPAN_DB:
+		return window_low, window_high
+
+	center = (window_low + window_high) * 0.5
+	window_low = center - (MIN_DISPLAY_SPAN_DB * 0.5)
+	window_high = center + (MIN_DISPLAY_SPAN_DB * 0.5)
+	if window_low < floor_db:
+		window_low = floor_db
+		window_high = floor_db + MIN_DISPLAY_SPAN_DB
+	if window_high > ceiling_db:
+		window_high = ceiling_db
+		window_low = ceiling_db - MIN_DISPLAY_SPAN_DB
+	return window_low, window_high
+
+
 def show_polar_image(image_disp: np.ndarray, window: str = "Flexview") -> None:
 	"""Display a raw polar data matrix (range vs. angle) with OpenCV."""
 	img = image_disp
@@ -67,16 +119,45 @@ def render_cartesian_image(
     x_coords: np.ndarray,
     z_coords: np.ndarray,
     output_width_px: int = 800,
+    auto_intensity_enabled: bool = True,
+    display_low_db: float = -90.0,
+    display_high_db: float = -30.0,
+    palette_name: str = DEFAULT_PALETTE,
+    display_floor_db: float = -120.0,
+    display_ceiling_db: float = 0.0,
 ) -> np.ndarray:
-    """Render polar data onto Cartesian fan close to matplotlib pcolormesh."""
-    src = np.asarray(image_disp, dtype=np.float32)
-    if src.ndim != 2 or src.size == 0:
+    """Render polar data onto Cartesian fan using absolute dB mapping."""
+    src_db = np.asarray(image_disp, dtype=np.float32)
+    if src_db.ndim != 2 or src_db.size == 0:
         return np.zeros((100, max(1, int(output_width_px)), 3), dtype=np.uint8)
 
-    src_norm = src - float(np.min(src))
-    src_max = float(np.max(src_norm))
-    if src_max > 0:
-        src_norm = src_norm / src_max
+    floor_db = float(display_floor_db)
+    ceiling_db = float(display_ceiling_db)
+    if ceiling_db <= floor_db:
+        ceiling_db = floor_db + 1.0
+    finite_src = src_db[np.isfinite(src_db)]
+    if finite_src.size == 0:
+        return np.zeros((100, max(1, int(output_width_px)), 3), dtype=np.uint8)
+
+    if auto_intensity_enabled:
+        auto_low = float(np.percentile(finite_src, AUTO_LOW_PERCENTILE))
+        auto_high = float(np.percentile(finite_src, AUTO_HIGH_PERCENTILE))
+        window_low, window_high = _sanitize_display_window_db(
+            low_db=auto_low,
+            high_db=auto_high,
+            floor_db=floor_db,
+            ceiling_db=ceiling_db,
+        )
+    else:
+        window_low, window_high = _sanitize_display_window_db(
+            low_db=float(display_low_db),
+            high_db=float(display_high_db),
+            floor_db=floor_db,
+            ceiling_db=ceiling_db,
+        )
+
+    src_clip = np.clip(src_db, window_low, window_high)
+    src_norm = (src_clip - window_low) / (window_high - window_low)
 
     # Determine canvas size from coordinates.
     x_min = float(np.min(x_coords))
@@ -163,7 +244,7 @@ def render_cartesian_image(
         borderValue=0.0,
     )
     remapped_u8 = np.clip(np.round(remapped * 255.0), 0, 255).astype(np.uint8)
-    return _hot_colormap(remapped_u8)
+    return apply_palette(remapped_u8, palette_name)
 
 
 def draw_polar_grid(

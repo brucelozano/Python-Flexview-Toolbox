@@ -43,3 +43,18 @@ def magnitude_log10(image_complex: np.ndarray) -> np.ndarray:
 	return np.log10(mag + 1.0).astype(np.float32)
 
 
+def magnitude_db(
+	image_complex: np.ndarray,
+	*,
+	ref_amplitude: float = 1.0,
+	floor_db: float = -120.0,
+) -> np.ndarray:
+	"""Return amplitude in decibels using a fixed floor to avoid -inf."""
+	ref = max(1e-12, float(ref_amplitude))
+	floor = float(floor_db)
+	eps = ref * (10.0 ** (floor / 20.0))
+	mag = np.abs(image_complex).astype(np.float32)
+	db = 20.0 * np.log10(np.maximum(mag, eps) / ref)
+	return db.astype(np.float32)
+
+

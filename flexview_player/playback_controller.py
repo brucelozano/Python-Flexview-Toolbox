@@ -5,7 +5,13 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
+from flexview_py.display import normalize_palette_name
+
 from .data_worker import MatlabDataWorker, RenderedFrame
+
+DISPLAY_DB_FLOOR = -120.0
+DISPLAY_DB_CEILING = 0.0
+DISPLAY_DB_MIN_SPAN = 1.0
 
 
 @dataclass
@@ -15,6 +21,10 @@ class PlayerState:
 	is_playing: bool = False
 	current_ping_index: int = 0
 	playback_rate: float = 1.0
+	auto_intensity_enabled: bool = True
+	display_low_db: float = -90.0
+	display_high_db: float = -30.0
+	palette_name: str = "hot"
 	last_loaded_ping_number: int = 0
 	discovered_max_ping_index: int = 1000
 
@@ -105,6 +115,38 @@ class PlaybackController(QObject):
 	def set_show_grid(self, show_grid: bool) -> None:
 		self._show_grid = bool(show_grid)
 
+	def set_auto_intensity(self, enabled: bool) -> None:
+		auto_enabled = bool(enabled)
+		if auto_enabled == self._state.auto_intensity_enabled:
+			return
+		self._state.auto_intensity_enabled = auto_enabled
+		self._refresh_display_state()
+
+	def set_display_window_db(
+		self,
+		*,
+		low_db: float | None = None,
+		high_db: float | None = None,
+	) -> None:
+		low = self._state.display_low_db if low_db is None else float(low_db)
+		high = self._state.display_high_db if high_db is None else float(high_db)
+		low, high = self._clamp_display_window_db(low, high)
+		if (
+			abs(low - self._state.display_low_db) < 1e-6
+			and abs(high - self._state.display_high_db) < 1e-6
+		):
+			return
+		self._state.display_low_db = low
+		self._state.display_high_db = high
+		self._refresh_display_state()
+
+	def set_palette(self, palette_name: str) -> None:
+		normalized = normalize_palette_name(palette_name)
+		if normalized == self._state.palette_name:
+			return
+		self._state.palette_name = normalized
+		self._refresh_display_state()
+
 	def set_cart_render_target(
 		self,
 		width_px: int,
@@ -146,6 +188,10 @@ class PlaybackController(QObject):
 				cart_width_px=self._cart_render_width_px,
 				cart_height_px=self._cart_render_height_px,
 				show_grid=self._show_grid,
+				auto_intensity_enabled=self._state.auto_intensity_enabled,
+				display_low_db=self._state.display_low_db,
+				display_high_db=self._state.display_high_db,
+				palette_name=self._state.palette_name,
 			)
 		except Exception as exc:
 			if ping_index > self._state.current_ping_index:
@@ -196,3 +242,30 @@ class PlaybackController(QObject):
 	def _emit_state(self, message: str) -> None:
 		self.status_message.emit(message)
 		self.state_changed.emit(self.state())
+
+	def _refresh_display_state(self) -> None:
+		self.state_changed.emit(self.state())
+		if self._state.connected and bool(self._state.file_path) and not self._state.is_playing:
+			self._load_frame(self._state.current_ping_index, status=False)
+
+	@staticmethod
+	def _clamp_display_window_db(low: float, high: float) -> tuple[float, float]:
+		floor = DISPLAY_DB_FLOOR
+		ceiling = DISPLAY_DB_CEILING
+		min_span = DISPLAY_DB_MIN_SPAN
+
+		low_clamped = min(ceiling - min_span, max(floor, float(low)))
+		high_clamped = min(ceiling, max(floor + min_span, float(high)))
+		if high_clamped - low_clamped >= min_span:
+			return low_clamped, high_clamped
+
+		center = (low_clamped + high_clamped) * 0.5
+		low_clamped = center - (min_span * 0.5)
+		high_clamped = center + (min_span * 0.5)
+		if low_clamped < floor:
+			low_clamped = floor
+			high_clamped = floor + min_span
+		if high_clamped > ceiling:
+			high_clamped = ceiling
+			low_clamped = ceiling - min_span
+		return low_clamped, high_clamped
