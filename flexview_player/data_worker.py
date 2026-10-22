@@ -9,7 +9,6 @@ import numpy as np
 from flexview_py.display import (
 	apply_palette,
 	compute_cartesian_view_bounds,
-	draw_polar_grid,
 	render_cartesian_image,
 )
 from flexview_py.geometry import compute_rangelist_from_header, magnitude_db, polar_to_cartesian
@@ -145,13 +144,7 @@ class MatlabDataWorker:
 			zoom_center_x_m=float(zoom_center_x_m),
 			zoom_center_z_m=float(zoom_center_z_m),
 		)
-		if show_grid:
-			draw_polar_grid(
-				cart_bgr,
-				ranges,
-				beam_angles,
-				cart_bounds_m=(cart_x_min, cart_x_max, cart_z_min, cart_z_max),
-			)
+		_ = show_grid  # Grid is drawn as a high-quality UI overlay in the main window.
 
 		default_ping_number = effective_ping_index
 		ping_number = int(float(header.get("Ping_Number", default_ping_number)))

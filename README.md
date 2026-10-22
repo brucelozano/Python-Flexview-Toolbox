@@ -66,13 +66,14 @@ py -3 -m flexview_player
 
 - `Grid: On/Off [G]`: toggle fan-view grid overlay.
 - `Fan Focus: On/Off [F]`: hide/show the polar panel to give the fan view more space.
+- `Zoom: On/Off [Z]`: toggle cartesian zoom mode.
 - Polar and cartesian fan views are shown side-by-side.
 
 ### Measurement
 
 - `Measure: On/Off [A]`: enable/disable distance measurement mode.
 - Click point A, then point B in the cartesian fan view to stage one measurement.
-- `Z`: undo last click (or last staged measurement if no active click).
+- `Ctrl+Z`: undo last click (or last staged measurement if no active click).
 - `S`: save all staged measurements.
 - `Annotator` button: set the annotator name used in saved measurement files.
 

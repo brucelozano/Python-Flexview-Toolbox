@@ -100,7 +100,7 @@ class MainWindow(QMainWindow):
 		self._file_label.setWordWrap(True)
 		self._meta_label = QLabel("Index: - | Ping: - | Size: - | Beam: - | Range: -")
 		self._meta_label.setWordWrap(True)
-		self._cursor_label = QLabel("x: - | z: - | range: - | angle: -")
+		self._cursor_label = QLabel("x: - | z: - | range: - | angle: - | bearing: -")
 		self._measurement_label = QLabel(
 			"Mode OFF | Annotator (not set) | Staged 0 | Click 'Measure' or press A."
 		)
@@ -166,7 +166,7 @@ class MainWindow(QMainWindow):
 		self._tvg_offset_slider.setSingleStep(1)
 		self._tvg_offset_slider.setPageStep(5)
 		self._tvg_offset_slider.setValue(0)
-		self._zoom_enabled_btn = QPushButton("Zoom: Off")
+		self._zoom_enabled_btn = QPushButton("Zoom: Off [Z]")
 		self._zoom_enabled_btn.setCheckable(True)
 		self._zoom_enabled_btn.setChecked(False)
 		self._zoom_scale_label = QLabel("Zoom: 1.0x")
@@ -408,14 +408,16 @@ class MainWindow(QMainWindow):
 			return super().eventFilter(watched, event)
 
 		modifiers = event.modifiers()
-		if modifiers not in (Qt.KeyboardModifier.NoModifier, Qt.KeyboardModifier.KeypadModifier):
-			return super().eventFilter(watched, event)
+		normalized_modifiers = modifiers & ~Qt.KeyboardModifier.KeypadModifier
 
 		key = event.key()
-		if key == Qt.Key.Key_S:
+		if key == Qt.Key.Key_S and normalized_modifiers == Qt.KeyboardModifier.NoModifier:
 			self._save_measurement()
 			return True
-		if key == Qt.Key.Key_Z:
+		if key == Qt.Key.Key_Z and normalized_modifiers == Qt.KeyboardModifier.NoModifier:
+			self._toggle_zoom_mode()
+			return True
+		if key == Qt.Key.Key_Z and normalized_modifiers == Qt.KeyboardModifier.ControlModifier:
 			self._undo_measurement_click()
 			return True
 		return super().eventFilter(watched, event)
@@ -442,10 +444,7 @@ class MainWindow(QMainWindow):
 		enabled = bool(checked)
 		self._grid_toggle_btn.setText("Grid: On [G]" if enabled else "Grid: Off [G]")
 		self._controller.set_show_grid(enabled)
-		state = self._controller.state()
-		if state.connected and state.file_path and not state.is_playing:
-			# Refresh current frame immediately when paused.
-			self._controller.set_ping_index(state.current_ping_index)
+		self._refresh_pixmaps()
 		self._set_status("Fan grid enabled." if enabled else "Fan grid disabled.")
 
 	def _on_auto_intensity_toggled(self, checked: bool) -> None:
@@ -526,7 +525,7 @@ class MainWindow(QMainWindow):
 
 	def _on_zoom_enabled_toggled(self, checked: bool) -> None:
 		zoom_enabled = bool(checked)
-		self._zoom_enabled_btn.setText("Zoom: On" if zoom_enabled else "Zoom: Off")
+		self._zoom_enabled_btn.setText("Zoom: On [Z]" if zoom_enabled else "Zoom: Off [Z]")
 		self._set_zoom_controls_enabled(zoom_enabled)
 		if not zoom_enabled:
 			self._clear_zoom_box_selection(refresh=True)
@@ -561,6 +560,9 @@ class MainWindow(QMainWindow):
 
 	def _toggle_fan_focus(self) -> None:
 		self._fan_focus_btn.toggle()
+
+	def _toggle_zoom_mode(self) -> None:
+		self._zoom_enabled_btn.toggle()
 
 	def _toggle_measure_mode(self) -> None:
 		self._measure_mode_btn.toggle()
@@ -673,7 +675,7 @@ class MainWindow(QMainWindow):
 			self._zoom_enabled_btn.blockSignals(True)
 			self._zoom_enabled_btn.setChecked(state.zoom_enabled)
 			self._zoom_enabled_btn.blockSignals(False)
-		self._zoom_enabled_btn.setText("Zoom: On" if state.zoom_enabled else "Zoom: Off")
+		self._zoom_enabled_btn.setText("Zoom: On [Z]" if state.zoom_enabled else "Zoom: Off [Z]")
 
 		zoom_scale_tenths = int(np.clip(int(round(float(state.zoom_scale) * 10.0)), 10, 80))
 		if self._zoom_scale_slider.value() != zoom_scale_tenths:
@@ -692,11 +694,18 @@ class MainWindow(QMainWindow):
 
 	def _set_cursor_readout(self, world: WorldPoint | None) -> None:
 		if world is None:
-			self._cursor_label.setText("x: - | z: - | range: - | angle: -")
+			self._cursor_label.setText("x: - | z: - | range: - | angle: - | bearing: -")
 			return
 		x_m, z_m, range_m, angle_deg = world
+		if abs(angle_deg) < 1e-9:
+			bearing_deg = 0
+		elif angle_deg > 0:
+			bearing_deg = int(round(360.0 - angle_deg)) % 360
+		else:
+			bearing_deg = int(round(-angle_deg)) % 360
 		self._cursor_label.setText(
-			f"x: {x_m:.2f} m | z: {z_m:.2f} m | range: {range_m:.2f} m | angle: {angle_deg:.2f} deg"
+			f"x: {x_m:.2f} m | z: {z_m:.2f} m | range: {range_m:.2f} m | "
+			f"angle: {angle_deg:.2f} deg | bearing: {bearing_deg:03d}"
 		)
 
 	def _set_measurement_summary(self, detail: str) -> None:
@@ -768,6 +777,8 @@ class MainWindow(QMainWindow):
 				Qt.AspectRatioMode.KeepAspectRatio,
 				Qt.TransformationMode.SmoothTransformation,
 			)
+			if self._grid_toggle_btn.isChecked():
+				scaled = self._draw_grid_overlay(scaled)
 			if self._measure_current_points_px or self._staged_measurements:
 				scaled = self._draw_measurement_overlay(scaled)
 			if self._zoom_box_start_px is not None and self._zoom_box_current_px is not None:
@@ -905,7 +916,7 @@ class MainWindow(QMainWindow):
 		self._zoom_enabled_btn.blockSignals(True)
 		self._zoom_enabled_btn.setChecked(bool(zoom_enabled))
 		self._zoom_enabled_btn.blockSignals(False)
-		self._zoom_enabled_btn.setText("Zoom: On" if bool(zoom_enabled) else "Zoom: Off")
+		self._zoom_enabled_btn.setText("Zoom: On [Z]" if bool(zoom_enabled) else "Zoom: Off [Z]")
 		self._zoom_scale_slider.blockSignals(True)
 		self._zoom_scale_slider.setValue(int(round(zoom_scale * 10.0)))
 		self._zoom_scale_slider.blockSignals(False)
@@ -993,22 +1004,22 @@ class MainWindow(QMainWindow):
 			world_a = self._cart_pixel_to_world(point_a[0], point_a[1])
 			if world_a is not None:
 				self._set_measurement_summary(
-					f"Point A: x={world_a[0]:.2f} m, z={world_a[1]:.2f} m | Click point B | Z=undo."
+					f"Point A: x={world_a[0]:.2f} m, z={world_a[1]:.2f} m | Click point B | Ctrl+Z=undo."
 				)
 			else:
-				self._set_measurement_summary("Point A set | Click point B | Z=undo.")
+				self._set_measurement_summary("Point A set | Click point B | Ctrl+Z=undo.")
 			return
 
 		if staged_count > 0:
 			if last_distance_m is not None:
 				self._set_measurement_summary(
-					f"Last distance: {last_distance_m:.2f} m | Click A then B | Z=undo, S=save."
+					f"Last distance: {last_distance_m:.2f} m | Click A then B | Ctrl+Z=undo, S=save."
 				)
 			else:
-				self._set_measurement_summary("Click A then B for next | Z=undo, S=save.")
+				self._set_measurement_summary("Click A then B for next | Ctrl+Z=undo, S=save.")
 			return
 
-		self._set_measurement_summary("Click point A then B | Z=undo, S=save.")
+		self._set_measurement_summary("Click point A then B | Ctrl+Z=undo, S=save.")
 
 	def _on_cart_mouse_left(self) -> None:
 		self._set_cursor_readout(None)
@@ -1381,6 +1392,153 @@ class MainWindow(QMainWindow):
 		range_m = float(np.hypot(x_m, z_m))
 		angle_deg = float(np.degrees(np.arctan2(x_m, z_m)))
 		return x_m, z_m, range_m, angle_deg
+
+	def _cart_world_to_source_pixel(self, x_m: float, z_m: float) -> tuple[float, float] | None:
+		frame = self._current_frame
+		if frame is None:
+			return None
+		img_h, img_w = frame.cartesian_bgr.shape[:2]
+		width_m = frame.cart_x_max_m - frame.cart_x_min_m
+		if img_w <= 0 or width_m <= 0:
+			return None
+		scale = img_w / width_m
+		pixel_u = (frame.cart_x_max_m - float(x_m)) * scale
+		pixel_v = (img_h - 1) - ((float(z_m) - frame.cart_z_min_m) * scale)
+		if not np.isfinite(pixel_u) or not np.isfinite(pixel_v):
+			return None
+		return float(pixel_u), float(pixel_v)
+
+	def _draw_grid_overlay(self, scaled_pixmap: QPixmap) -> QPixmap:
+		if self._cart_pixmap is None or self._current_frame is None:
+			return scaled_pixmap
+
+		frame = self._current_frame
+		out = scaled_pixmap.copy()
+		painter = QPainter(out)
+		painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+		painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+
+		scale_x = out.width() / self._cart_pixmap.width()
+		scale_y = out.height() / self._cart_pixmap.height()
+
+		def _world_to_display(x_m: float, z_m: float) -> tuple[float, float] | None:
+			source = self._cart_world_to_source_pixel(x_m, z_m)
+			if source is None:
+				return None
+			return source[0] * scale_x, source[1] * scale_y
+
+		metrics = painter.fontMetrics()
+		text_pad_px = 4
+
+		def _draw_text_clamped(
+			text: str,
+			x_px: float,
+			baseline_y_px: float,
+			*,
+			h_align: str = "left",
+		) -> None:
+			text_w = max(1, metrics.horizontalAdvance(text))
+			if h_align == "right":
+				draw_x = int(round(x_px - text_w))
+			elif h_align == "center":
+				draw_x = int(round(x_px - (text_w * 0.5)))
+			else:
+				draw_x = int(round(x_px))
+			max_x = max(text_pad_px, out.width() - text_w - text_pad_px)
+			draw_x = int(np.clip(draw_x, text_pad_px, max_x))
+
+			min_baseline = text_pad_px + metrics.ascent()
+			max_baseline = out.height() - text_pad_px - metrics.descent()
+			draw_baseline = int(round(np.clip(baseline_y_px, min_baseline, max_baseline)))
+			painter.drawText(draw_x, draw_baseline, text)
+
+		grid_pen = QPen(QColor(210, 210, 210, 210))
+		grid_pen.setWidth(1)
+		painter.setPen(grid_pen)
+
+		range_values = np.linspace(frame.range_min_m, frame.range_max_m, 6, dtype=np.float32)
+		angle_values_deg = np.linspace(
+			frame.beam_min_deg,
+			frame.beam_max_deg,
+			121,
+			dtype=np.float32,
+		)
+		for r_m in range_values:
+			prev: tuple[float, float] | None = None
+			for angle_deg in angle_values_deg:
+				angle_rad = np.deg2rad(float(angle_deg))
+				x_m = float(r_m) * float(np.sin(angle_rad))
+				z_m = float(r_m) * float(np.cos(angle_rad))
+				current = _world_to_display(x_m, z_m)
+				if current is not None and prev is not None:
+					painter.drawLine(
+						int(round(prev[0])),
+						int(round(prev[1])),
+						int(round(current[0])),
+						int(round(current[1])),
+					)
+				prev = current
+
+			label_angle_deg = float(np.clip(frame.beam_min_deg + 3.0, frame.beam_min_deg, frame.beam_max_deg))
+			label_angle_rad = np.deg2rad(label_angle_deg)
+			label_x_m = float(r_m) * float(np.sin(label_angle_rad))
+			label_z_m = float(r_m) * float(np.cos(label_angle_rad))
+			label_pos = _world_to_display(label_x_m, label_z_m)
+			if label_pos is not None:
+				_draw_text_clamped(
+					f"{float(r_m):.2f} m",
+					label_pos[0] + 3.0,
+					label_pos[1] - 3.0,
+					h_align="left",
+				)
+
+		origin = _world_to_display(0.0, 0.0)
+		for angle_deg in (-60.0, -30.0, 0.0, 30.0, 60.0):
+			if not (frame.beam_min_deg <= angle_deg <= frame.beam_max_deg):
+				continue
+			angle_rad = np.deg2rad(angle_deg)
+			end_x_m = frame.range_max_m * float(np.sin(angle_rad))
+			end_z_m = frame.range_max_m * float(np.cos(angle_rad))
+			end_point = _world_to_display(end_x_m, end_z_m)
+			if origin is not None and end_point is not None:
+				painter.drawLine(
+					int(round(origin[0])),
+					int(round(origin[1])),
+					int(round(end_point[0])),
+					int(round(end_point[1])),
+				)
+
+			label_range_m = frame.range_max_m * 1.03
+			label_x_m = label_range_m * float(np.sin(angle_rad))
+			label_z_m = label_range_m * float(np.cos(angle_rad))
+			label_point = _world_to_display(label_x_m, label_z_m)
+			if label_point is not None:
+				if angle_deg == 0.0:
+					angle_label = "000"
+				elif angle_deg > 0.0:
+					angle_label = f"{int(360 - angle_deg):03d}"
+				else:
+					angle_label = f"{int(-angle_deg):03d}"
+				_draw_text_clamped(
+					angle_label,
+					label_point[0],
+					label_point[1] - 2.0,
+					h_align="center",
+				)
+
+		axis_left = _world_to_display(frame.cart_x_min_m, 0.0)
+		axis_right = _world_to_display(frame.cart_x_max_m, 0.0)
+		if axis_left is not None and axis_right is not None:
+			left_x = int(round(axis_left[0]))
+			left_y = int(round(axis_left[1]))
+			right_x = int(round(axis_right[0]))
+			right_y = int(round(axis_right[1]))
+			painter.drawLine(left_x, left_y, right_x, right_y)
+			_draw_text_clamped("270", left_x + 5.0, left_y - 5.0, h_align="left")
+			_draw_text_clamped("090", right_x - 5.0, right_y - 5.0, h_align="right")
+
+		painter.end()
+		return out
 
 	def _draw_measurement_overlay(self, scaled_pixmap: QPixmap) -> QPixmap:
 		if self._cart_pixmap is None:
