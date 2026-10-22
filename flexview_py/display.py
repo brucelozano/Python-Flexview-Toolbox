@@ -8,7 +8,7 @@ _REMAP_CACHE: dict[tuple, tuple[np.ndarray, np.ndarray]] = {}
 _REMAP_CACHE_ORDER: list[tuple] = []
 _HOT_LUT: np.ndarray | None = None
 DEFAULT_PALETTE = "hot"
-SUPPORTED_PALETTES = ("hot", "inferno", "viridis", "cividis", "gray")
+SUPPORTED_PALETTES = ("hot", "inferno", "viridis", "cividis", "gray", "blue")
 AUTO_LOW_PERCENTILE = 5.0
 AUTO_HIGH_PERCENTILE = 99.0
 MIN_DISPLAY_SPAN_DB = 1.0
@@ -59,6 +59,8 @@ def _hot_colormap(image_u8: np.ndarray) -> np.ndarray:
 
 def normalize_palette_name(palette_name: str) -> str:
 	name = str(palette_name).strip().lower()
+	if name == "ocean":
+		name = "blue"
 	if name in SUPPORTED_PALETTES:
 		return name
 	return DEFAULT_PALETTE
@@ -75,6 +77,7 @@ def apply_palette(image_u8: np.ndarray, palette_name: str) -> np.ndarray:
 		"inferno": cv2.COLORMAP_INFERNO,
 		"viridis": getattr(cv2, "COLORMAP_VIRIDIS", cv2.COLORMAP_HOT),
 		"cividis": getattr(cv2, "COLORMAP_CIVIDIS", cv2.COLORMAP_HOT),
+		"blue": getattr(cv2, "COLORMAP_OCEAN", cv2.COLORMAP_WINTER),
 	}
 	colormap = colormap_by_name.get(palette, cv2.COLORMAP_HOT)
 	return cv2.applyColorMap(image_u8, colormap)
@@ -121,6 +124,56 @@ def _apply_tvg_db(
 	return src_db + gain_db[:, None]
 
 
+def compute_cartesian_view_bounds(
+	x_coords: np.ndarray,
+	z_coords: np.ndarray,
+	*,
+	zoom_enabled: bool = False,
+	zoom_scale: float = 1.0,
+	zoom_center_x_m: float = float("nan"),
+	zoom_center_z_m: float = float("nan"),
+) -> tuple[float, float, float, float]:
+	"""Return cartesian render bounds in meters for full view or zoomed ROI."""
+	x_min_full = float(np.min(x_coords))
+	x_max_full = float(np.max(x_coords))
+	z_min_full = 0.0
+	z_max_full = float(np.max(z_coords))
+	full_width_m = x_max_full - x_min_full
+	full_height_m = z_max_full - z_min_full
+	if full_width_m <= 0.0 or full_height_m <= 0.0:
+		return x_min_full, x_max_full, z_min_full, z_max_full
+
+	if not bool(zoom_enabled):
+		return x_min_full, x_max_full, z_min_full, z_max_full
+
+	scale = max(1.0, float(zoom_scale))
+	if scale <= 1.0 + 1e-6:
+		return x_min_full, x_max_full, z_min_full, z_max_full
+
+	roi_width_m = full_width_m / scale
+	roi_height_m = full_height_m / scale
+	if roi_width_m <= 0.0 or roi_height_m <= 0.0:
+		return x_min_full, x_max_full, z_min_full, z_max_full
+
+	center_x = float(zoom_center_x_m)
+	center_z = float(zoom_center_z_m)
+	if not np.isfinite(center_x):
+		center_x = 0.5 * (x_min_full + x_max_full)
+	if not np.isfinite(center_z):
+		center_z = 0.5 * (z_min_full + z_max_full)
+
+	x_min_roi = center_x - (roi_width_m * 0.5)
+	z_min_roi = center_z - (roi_height_m * 0.5)
+	x_min_roi = float(np.clip(x_min_roi, x_min_full, x_max_full - roi_width_m))
+	z_min_roi = float(np.clip(z_min_roi, z_min_full, z_max_full - roi_height_m))
+	return (
+		x_min_roi,
+		x_min_roi + roi_width_m,
+		z_min_roi,
+		z_min_roi + roi_height_m,
+	)
+
+
 def show_polar_image(image_disp: np.ndarray, window: str = "Flexview") -> None:
 	"""Display a raw polar data matrix (range vs. angle) with OpenCV."""
 	img = image_disp
@@ -148,6 +201,10 @@ def render_cartesian_image(
     tvg_log_slope_db_per_decade: float = 20.0,
     tvg_linear_slope_db_per_m: float = 0.0,
     tvg_offset_db: float = 0.0,
+    zoom_enabled: bool = False,
+    zoom_scale: float = 1.0,
+    zoom_center_x_m: float = float("nan"),
+    zoom_center_z_m: float = float("nan"),
 ) -> np.ndarray:
     """Render polar data onto Cartesian fan using absolute dB mapping."""
     src_db = np.asarray(image_disp, dtype=np.float32)
@@ -194,12 +251,16 @@ def render_cartesian_image(
     src_norm = (src_clip - window_low) / (window_high - window_low)
 
     # Determine canvas size from coordinates.
-    x_min = float(np.min(x_coords))
-    x_max = float(np.max(x_coords))
-    z_max = float(np.max(z_coords))
-    z_min_render = 0.0
-    width_m = x_max - x_min
-    height_m = z_max - z_min_render
+    x_min_render, x_max_render, z_min_render, z_max_render = compute_cartesian_view_bounds(
+        x_coords,
+        z_coords,
+        zoom_enabled=bool(zoom_enabled),
+        zoom_scale=float(zoom_scale),
+        zoom_center_x_m=float(zoom_center_x_m),
+        zoom_center_z_m=float(zoom_center_z_m),
+    )
+    width_m = x_max_render - x_min_render
+    height_m = z_max_render - z_min_render
     if width_m <= 0 or height_m <= 0:
         return np.zeros((100, max(1, int(output_width_px)), 3), dtype=np.uint8)
 
@@ -229,9 +290,10 @@ def render_cartesian_image(
         round(float(ranges[-1]), 5),
         round(float(beam_angles_deg[0]), 5),
         round(float(beam_angles_deg[-1]), 5),
-        round(x_min, 5),
-        round(x_max, 5),
-        round(z_max, 5),
+        round(x_min_render, 5),
+        round(x_max_render, 5),
+        round(z_min_render, 5),
+        round(z_max_render, 5),
     )
     maps = _remap_cache_get(remap_key)
     if maps is None:
@@ -239,7 +301,7 @@ def render_cartesian_image(
         v = np.arange(output_height_px, dtype=np.float32)
         uu, vv = np.meshgrid(u, v, indexing="xy")
 
-        x_world = x_max - (uu / scale)
+        x_world = x_max_render - (uu / scale)
         z_world = z_min_render + ((output_height_px - 1 - vv) / scale)
         r_world = np.hypot(x_world, z_world)
         a_world = np.rad2deg(np.arctan2(x_world, z_world))
@@ -289,21 +351,27 @@ def draw_polar_grid(
 	azimuth_mode: str = 'northup',
 	color: tuple[int, int, int] = (200, 200, 200),
 	font_scale: float = 0.4,
+	cart_bounds_m: tuple[float, float, float, float] | None = None,
 ) -> None:
 	"""Overlay a polar grid with labels onto the Cartesian canvas."""
 	h, w, _ = canvas.shape
-	
-	# --- Calculate scale and origin based on canvas dimensions ---
-	# This logic mirrors render_cartesian_image to map meters -> pixels
-	x_coords, _ = polar_to_cartesian(ranges, beam_angles_deg)
-	x_min, x_max = np.min(x_coords), np.max(x_coords)
-	
+	if cart_bounds_m is None:
+		x_coords, z_coords = polar_to_cartesian(ranges, beam_angles_deg)
+		x_min = float(np.min(x_coords))
+		x_max = float(np.max(x_coords))
+		z_min = 0.0
+	else:
+		x_min = float(cart_bounds_m[0])
+		x_max = float(cart_bounds_m[1])
+		z_min = float(cart_bounds_m[2])
+
 	width_m = x_max - x_min
+	if width_m <= 0.0:
+		return
 	scale = w / width_m
-	
-	# Sonar origin in pixel coordinates
-	origin_u = int(((0 - x_min) * scale))
-	origin_v = h - 1
+	origin_u = int(round((0.0 - x_min) * scale))
+	# For z=0, this can be outside the view when zoomed away from near range.
+	origin_v = int(round((h - 1) + (z_min * scale)))
 
 	# --- Draw Range Rings (Arcs) ---
 	min_range, max_range = ranges[0], ranges[-1]

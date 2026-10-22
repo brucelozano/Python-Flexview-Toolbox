@@ -1,6 +1,6 @@
 # Flexview Player (Python + MATLAB Engine)
 
-This project is focused on a Python player and annotation tool for Flexview IMB data.
+This project is focused on a Python player and annotation tool for Flexview IMB/MMB data.
 MATLAB Engine is used for data decoding, and Python handles playback UI, rendering, and exports.
 
 If you only need one command to get started:
@@ -9,7 +9,7 @@ If you only need one command to get started:
 py -3 -m flexview_player
 ```
 
-Current player scope: `.imb` files.
+Current player scope: `.imb` and `.mmb` files (`.mmb` uses default `image_index=0` in MVP mode).
 
 ## Quick Start
 
@@ -42,7 +42,7 @@ py -3 -m flexview_player
 ## Player Workflow
 
 1. Click `Connect MATLAB`.
-2. Click `Open .imb` and choose a file.
+2. Click `Open` and choose an `.imb` or `.mmb` file.
 3. Navigate pings with play/pause, step buttons, timeline, and ping index spinner.
 4. Toggle `Grid` and `Fan Focus` as needed while reviewing the fan view.
 5. Use measurement mode to stage and save distances on the fan view.
@@ -79,7 +79,8 @@ py -3 -m flexview_player
 ## Features
 
 - MATLAB connect/disconnect from the UI.
-- `.imb` file open + ping-by-ping playback.
+- `.imb` / `.mmb` file open + ping-by-ping playback.
+- `.mmb` MVP path uses MATLAB beamforming per ping with default `image_index=0`.
 - End-of-file handling while stepping/playing.
 - Polar and cartesian fan rendering per frame.
 - Fan Focus mode (`F`) to prioritize cartesian fan inspection.

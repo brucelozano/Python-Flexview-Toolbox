@@ -72,9 +72,16 @@ class MatlabSession:
 		"""Run one-ping beamforming via MATLAB helper.
 		Returns (header_dict, beam_angles, image_data, range_list, actual_ping_num).
 		"""
-		header_json, beam_angles, image_data, range_list, actual_ping_num = self.eng.beamform_ping_py(
-			filename, float(ping_index), float(image_index), nargout=5
+		ok, header_json, beam_angles, image_data, range_list, actual_ping_num, err_msg = (
+			self.eng.beamform_ping_quiet_py(
+				filename,
+				float(ping_index),
+				float(image_index),
+				nargout=7,
+			)
 		)
+		if not bool(ok):
+			raise RuntimeError(str(err_msg))
 		header = json.loads(header_json)
 		return header, beam_angles, image_data, range_list, int(actual_ping_num)
 

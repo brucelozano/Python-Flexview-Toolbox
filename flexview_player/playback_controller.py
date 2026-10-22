@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -20,6 +21,8 @@ TVG_LINEAR_SLOPE_MIN = -5.0
 TVG_LINEAR_SLOPE_MAX = 5.0
 TVG_OFFSET_MIN = -40.0
 TVG_OFFSET_MAX = 40.0
+ZOOM_SCALE_MIN = 1.0
+ZOOM_SCALE_MAX = 8.0
 
 
 @dataclass
@@ -38,6 +41,10 @@ class PlayerState:
 	tvg_log_slope_db_per_decade: float = 20.0
 	tvg_linear_slope_db_per_m: float = 0.0
 	tvg_offset_db: float = 0.0
+	zoom_enabled: bool = False
+	zoom_scale: float = 1.0
+	zoom_center_x_m: float = float("nan")
+	zoom_center_z_m: float = float("nan")
 	last_loaded_ping_number: int = 0
 	discovered_max_ping_index: int = 1000
 
@@ -85,19 +92,22 @@ class PlaybackController(QObject):
 		if not path.exists():
 			self._emit_state(f"File not found: {file_path}")
 			return
-		if path.suffix.lower() != ".imb":
-			self._emit_state("Please select a .imb file for v1 playback.")
+		if path.suffix.lower() not in {".imb", ".mmb"}:
+			self._emit_state("Please select an .imb or .mmb file for v1 playback.")
 			return
 		self._state.file_path = str(path.resolve())
 		self._state.current_ping_index = 0
 		self._state.discovered_max_ping_index = 1000
+		# Re-initialize center when the dataset changes so stale coordinates are not reused.
+		self._state.zoom_center_x_m = float("nan")
+		self._state.zoom_center_z_m = float("nan")
 		self._emit_state(f"Loaded file: {self._state.file_path}")
 		if self._state.connected:
 			self._load_frame(0, status=True)
 
 	def toggle_play(self) -> None:
 		if not self._state.file_path:
-			self._emit_state("Load an .imb file first.")
+			self._emit_state("Load an .imb or .mmb file first.")
 			return
 		if not self._state.connected:
 			self._emit_state("Connect MATLAB first.")
@@ -208,6 +218,53 @@ class PlaybackController(QObject):
 		self._state.tvg_offset_db = offset
 		self._refresh_display_state()
 
+	def set_zoom_enabled(self, enabled: bool) -> None:
+		zoom_enabled = bool(enabled)
+		if zoom_enabled == self._state.zoom_enabled:
+			return
+		self._state.zoom_enabled = zoom_enabled
+		self._refresh_display_state()
+
+	def set_zoom_scale(self, zoom_scale: float) -> None:
+		scale_clamped = self._clamp_zoom_scale(zoom_scale)
+		if abs(scale_clamped - self._state.zoom_scale) < 1e-6:
+			return
+		self._state.zoom_scale = scale_clamped
+		self._refresh_display_state()
+
+	def set_zoom_center_world(self, x_m: float, z_m: float) -> None:
+		center_x = float(x_m)
+		center_z = float(z_m)
+		if not (math.isfinite(center_x) and math.isfinite(center_z)):
+			return
+		if (
+			math.isfinite(self._state.zoom_center_x_m)
+			and math.isfinite(self._state.zoom_center_z_m)
+			and abs(center_x - self._state.zoom_center_x_m) < 1e-6
+			and abs(center_z - self._state.zoom_center_z_m) < 1e-6
+		):
+			return
+		self._state.zoom_center_x_m = center_x
+		self._state.zoom_center_z_m = center_z
+		self._refresh_display_state()
+
+	def reset_zoom(self) -> None:
+		changed = False
+		if self._state.zoom_enabled:
+			self._state.zoom_enabled = False
+			changed = True
+		if abs(self._state.zoom_scale - 1.0) > 1e-6:
+			self._state.zoom_scale = 1.0
+			changed = True
+		if math.isfinite(self._state.zoom_center_x_m) or math.isfinite(
+			self._state.zoom_center_z_m
+		):
+			self._state.zoom_center_x_m = float("nan")
+			self._state.zoom_center_z_m = float("nan")
+			changed = True
+		if changed:
+			self._refresh_display_state()
+
 	def set_cart_render_target(
 		self,
 		width_px: int,
@@ -235,7 +292,7 @@ class PlaybackController(QObject):
 	def _load_frame(self, ping_index: int, status: bool = True) -> bool:
 		if not self._state.file_path:
 			if status:
-				self._emit_state("Load an .imb file first.")
+				self._emit_state("Load an .imb or .mmb file first.")
 			return False
 		if not self._state.connected:
 			if status:
@@ -258,6 +315,10 @@ class PlaybackController(QObject):
 				tvg_log_slope_db_per_decade=self._state.tvg_log_slope_db_per_decade,
 				tvg_linear_slope_db_per_m=self._state.tvg_linear_slope_db_per_m,
 				tvg_offset_db=self._state.tvg_offset_db,
+				zoom_enabled=self._state.zoom_enabled,
+				zoom_scale=self._state.zoom_scale,
+				zoom_center_x_m=self._state.zoom_center_x_m,
+				zoom_center_z_m=self._state.zoom_center_z_m,
 			)
 		except Exception as exc:
 			if ping_index > self._state.current_ping_index:
@@ -356,3 +417,7 @@ class PlaybackController(QObject):
 			linear_slope_clamped,
 			offset_clamped,
 		)
+
+	@staticmethod
+	def _clamp_zoom_scale(zoom_scale: float) -> float:
+		return min(ZOOM_SCALE_MAX, max(ZOOM_SCALE_MIN, float(zoom_scale)))

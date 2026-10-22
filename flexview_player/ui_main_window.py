@@ -50,6 +50,8 @@ class ImageViewLabel(QLabel):
 
 	mouse_moved = Signal(object)
 	mouse_pressed = Signal(object)
+	mouse_released = Signal(object)
+	mouse_double_clicked = Signal(object)
 	mouse_left = Signal()
 
 	def __init__(self, text: str) -> None:
@@ -69,6 +71,14 @@ class ImageViewLabel(QLabel):
 	def mousePressEvent(self, event) -> None:  # type: ignore[override]
 		self.mouse_pressed.emit(event.position())
 		super().mousePressEvent(event)
+
+	def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
+		self.mouse_released.emit(event.position())
+		super().mouseReleaseEvent(event)
+
+	def mouseDoubleClickEvent(self, event) -> None:  # type: ignore[override]
+		self.mouse_double_clicked.emit(event.position())
+		super().mouseDoubleClickEvent(event)
 
 	def leaveEvent(self, event) -> None:  # type: ignore[override]
 		self.mouse_left.emit()
@@ -132,6 +142,7 @@ class MainWindow(QMainWindow):
 		self._palette_combo.addItem("Inferno", "inferno")
 		self._palette_combo.addItem("Viridis", "viridis")
 		self._palette_combo.addItem("Cividis", "cividis")
+		self._palette_combo.addItem("Blue", "blue")
 		self._palette_combo.addItem("Gray", "gray")
 		self._palette_combo.setCurrentIndex(0)
 		self._tvg_enabled_btn = QPushButton("TVG: Off")
@@ -155,6 +166,16 @@ class MainWindow(QMainWindow):
 		self._tvg_offset_slider.setSingleStep(1)
 		self._tvg_offset_slider.setPageStep(5)
 		self._tvg_offset_slider.setValue(0)
+		self._zoom_enabled_btn = QPushButton("Zoom: Off")
+		self._zoom_enabled_btn.setCheckable(True)
+		self._zoom_enabled_btn.setChecked(False)
+		self._zoom_scale_label = QLabel("Zoom: 1.0x")
+		self._zoom_scale_slider = QSlider(Qt.Orientation.Horizontal)
+		self._zoom_scale_slider.setRange(10, 80)
+		self._zoom_scale_slider.setSingleStep(1)
+		self._zoom_scale_slider.setPageStep(5)
+		self._zoom_scale_slider.setValue(10)
+		self._zoom_reset_btn = QPushButton("Reset Zoom")
 		self._grid_toggle_btn = QPushButton("Grid: On [G]")
 		self._grid_toggle_btn.setCheckable(True)
 		self._grid_toggle_btn.setChecked(True)
@@ -174,6 +195,8 @@ class MainWindow(QMainWindow):
 		self._measure_current_points_px: list[tuple[float, float]] = []
 		self._staged_measurements: list[StagedMeasurement] = []
 		self._measurement_mode_enabled = False
+		self._zoom_box_start_px: tuple[float, float] | None = None
+		self._zoom_box_current_px: tuple[float, float] | None = None
 		self._annotator_name = ""
 		self._annotator_slug = ""
 		self._settings = QSettings("Flexview", "FlexviewPlayer")
@@ -309,6 +332,15 @@ class MainWindow(QMainWindow):
 		tvg_controls.addWidget(self._tvg_offset_slider, stretch=1)
 		root_layout.addLayout(tvg_controls)
 
+		zoom_controls = QHBoxLayout()
+		zoom_controls.addWidget(self._zoom_enabled_btn)
+		zoom_controls.addSpacing(8)
+		zoom_controls.addWidget(self._zoom_scale_label)
+		zoom_controls.addWidget(self._zoom_scale_slider, stretch=1)
+		zoom_controls.addSpacing(8)
+		zoom_controls.addWidget(self._zoom_reset_btn)
+		root_layout.addLayout(zoom_controls)
+
 		status_bar = QStatusBar(self)
 		status_bar.addWidget(self._status_label, stretch=1)
 		self.setStatusBar(status_bar)
@@ -332,6 +364,9 @@ class MainWindow(QMainWindow):
 		self._tvg_log_slope_slider.valueChanged.connect(self._on_tvg_log_slope_changed)
 		self._tvg_linear_slope_slider.valueChanged.connect(self._on_tvg_linear_slope_changed)
 		self._tvg_offset_slider.valueChanged.connect(self._on_tvg_offset_changed)
+		self._zoom_enabled_btn.toggled.connect(self._on_zoom_enabled_toggled)
+		self._zoom_scale_slider.valueChanged.connect(self._on_zoom_scale_changed)
+		self._zoom_reset_btn.clicked.connect(self._on_zoom_reset_clicked)
 		self._grid_toggle_btn.toggled.connect(self._on_grid_toggled)
 		self._fan_focus_btn.toggled.connect(self._on_fan_focus_toggled)
 		self._annotator_btn.clicked.connect(self._on_annotator_clicked)
@@ -343,6 +378,8 @@ class MainWindow(QMainWindow):
 		self._controller.frame_ready.connect(self._on_frame_ready)
 		self._cart_view.mouse_moved.connect(self._on_cart_mouse_moved)
 		self._cart_view.mouse_pressed.connect(self._on_cart_mouse_pressed)
+		self._cart_view.mouse_released.connect(self._on_cart_mouse_released)
+		self._cart_view.mouse_double_clicked.connect(self._on_cart_mouse_double_clicked)
 		self._cart_view.mouse_left.connect(self._on_cart_mouse_left)
 		self._shortcut_toggle_measure.activated.connect(self._toggle_measure_mode)
 		self._shortcut_toggle_measure.activatedAmbiguously.connect(self._toggle_measure_mode)
@@ -387,9 +424,9 @@ class MainWindow(QMainWindow):
 		start_dir = str(Path.cwd())
 		path, _ = QFileDialog.getOpenFileName(
 			self,
-			"Select IMB File",
+			"Select Sonar File",
 			start_dir,
-			"Flexview IMB Files (*.imb *.IMB);;All Files (*.*)",
+			"Flexview Sonar Files (*.imb *.IMB *.mmb *.MMB);;All Files (*.*)",
 		)
 		if path:
 			self._controller.open_imb_file(path)
@@ -485,6 +522,30 @@ class MainWindow(QMainWindow):
 			self._tvg_offset_slider.blockSignals(False)
 		self._tvg_offset_label.setText(f"TVG Offset: {offset_db} dB")
 		self._controller.set_tvg_parameters(offset_db=float(offset_db))
+		self._persist_display_preferences()
+
+	def _on_zoom_enabled_toggled(self, checked: bool) -> None:
+		zoom_enabled = bool(checked)
+		self._zoom_enabled_btn.setText("Zoom: On" if zoom_enabled else "Zoom: Off")
+		self._set_zoom_controls_enabled(zoom_enabled)
+		if not zoom_enabled:
+			self._clear_zoom_box_selection(refresh=True)
+		self._controller.set_zoom_enabled(zoom_enabled)
+		self._persist_display_preferences()
+
+	def _on_zoom_scale_changed(self, value: int) -> None:
+		scale_tenths = int(np.clip(int(value), 10, 80))
+		if self._zoom_scale_slider.value() != scale_tenths:
+			self._zoom_scale_slider.blockSignals(True)
+			self._zoom_scale_slider.setValue(scale_tenths)
+			self._zoom_scale_slider.blockSignals(False)
+		zoom_scale = float(scale_tenths) / 10.0
+		self._zoom_scale_label.setText(f"Zoom: {zoom_scale:.1f}x")
+		self._controller.set_zoom_scale(zoom_scale)
+		self._persist_display_preferences()
+
+	def _on_zoom_reset_clicked(self) -> None:
+		self._controller.reset_zoom()
 		self._persist_display_preferences()
 
 	def _toggle_grid_mode(self) -> None:
@@ -608,9 +669,22 @@ class MainWindow(QMainWindow):
 			self._tvg_offset_slider.setValue(offset_db)
 			self._tvg_offset_slider.blockSignals(False)
 		self._tvg_offset_label.setText(f"TVG Offset: {offset_db} dB")
+		if self._zoom_enabled_btn.isChecked() != state.zoom_enabled:
+			self._zoom_enabled_btn.blockSignals(True)
+			self._zoom_enabled_btn.setChecked(state.zoom_enabled)
+			self._zoom_enabled_btn.blockSignals(False)
+		self._zoom_enabled_btn.setText("Zoom: On" if state.zoom_enabled else "Zoom: Off")
+
+		zoom_scale_tenths = int(np.clip(int(round(float(state.zoom_scale) * 10.0)), 10, 80))
+		if self._zoom_scale_slider.value() != zoom_scale_tenths:
+			self._zoom_scale_slider.blockSignals(True)
+			self._zoom_scale_slider.setValue(zoom_scale_tenths)
+			self._zoom_scale_slider.blockSignals(False)
+		self._zoom_scale_label.setText(f"Zoom: {float(zoom_scale_tenths) / 10.0:.1f}x")
 
 		self._set_display_controls_enabled(state.auto_intensity_enabled)
 		self._set_tvg_controls_enabled(state.tvg_enabled)
+		self._set_zoom_controls_enabled(state.zoom_enabled)
 		self._play_btn.setText("Pause [Space]" if state.is_playing else "Play [Space]")
 
 	def _set_status(self, text: str) -> None:
@@ -638,6 +712,7 @@ class MainWindow(QMainWindow):
 			return
 		frame = frame_obj
 		self._current_frame = frame
+		self._clear_zoom_box_selection(refresh=False)
 		self._polar_pixmap = self._pixmap_from_bgr(frame.polar_bgr)
 		self._cart_pixmap = self._pixmap_from_bgr(frame.cartesian_bgr)
 		self._reset_measurement_state()
@@ -695,6 +770,8 @@ class MainWindow(QMainWindow):
 			)
 			if self._measure_current_points_px or self._staged_measurements:
 				scaled = self._draw_measurement_overlay(scaled)
+			if self._zoom_box_start_px is not None and self._zoom_box_current_px is not None:
+				scaled = self._draw_zoom_box_overlay(scaled)
 			self._cart_view.setPixmap(scaled)
 
 	def _clear_measurement(self) -> None:
@@ -729,6 +806,12 @@ class MainWindow(QMainWindow):
 		self._tvg_offset_label.setEnabled(enabled)
 		self._tvg_offset_slider.setEnabled(enabled)
 
+	def _set_zoom_controls_enabled(self, zoom_enabled: bool) -> None:
+		enabled = bool(zoom_enabled)
+		self._zoom_scale_label.setEnabled(enabled)
+		self._zoom_scale_slider.setEnabled(enabled)
+		self._zoom_reset_btn.setEnabled(enabled)
+
 	def _persist_display_preferences(self) -> None:
 		self._settings.setValue("display/auto_intensity_enabled", self._auto_intensity_btn.isChecked())
 		self._settings.setValue("display/low_db", int(self._low_db_slider.value()))
@@ -741,6 +824,11 @@ class MainWindow(QMainWindow):
 			float(self._tvg_linear_slope_slider.value()) / 10.0,
 		)
 		self._settings.setValue("display/tvg_offset_db", int(self._tvg_offset_slider.value()))
+		self._settings.setValue("display/zoom_enabled", self._zoom_enabled_btn.isChecked())
+		self._settings.setValue(
+			"display/zoom_scale",
+			float(self._zoom_scale_slider.value()) / 10.0,
+		)
 
 	def _load_saved_display_preferences(self) -> None:
 		auto_enabled = self._settings.value("display/auto_intensity_enabled", True, type=bool)
@@ -765,6 +853,8 @@ class MainWindow(QMainWindow):
 		tvg_offset_db = int(
 			round(float(self._settings.value("display/tvg_offset_db", 0.0, type=float)))
 		)
+		zoom_enabled = self._settings.value("display/zoom_enabled", False, type=bool)
+		zoom_scale = float(self._settings.value("display/zoom_scale", 1.0, type=float))
 
 		low_db = int(np.clip(low_db, -120, 0))
 		high_db = int(np.clip(high_db, -120, 0))
@@ -775,6 +865,7 @@ class MainWindow(QMainWindow):
 		tvg_log_slope = int(np.clip(tvg_log_slope, -20, 60))
 		tvg_linear_slope = float(np.clip(tvg_linear_slope, -5.0, 5.0))
 		tvg_offset_db = int(np.clip(tvg_offset_db, -40, 40))
+		zoom_scale = float(np.clip(zoom_scale, 1.0, 8.0))
 
 		palette_idx = self._palette_combo.findData(palette_name.lower())
 		self._palette_combo.blockSignals(True)
@@ -811,6 +902,15 @@ class MainWindow(QMainWindow):
 		self._tvg_log_slope_label.setText(f"TVG Log: {tvg_log_slope} dB/dec")
 		self._tvg_linear_slope_label.setText(f"TVG Lin: {tvg_linear_slope:.1f} dB/m")
 		self._tvg_offset_label.setText(f"TVG Offset: {tvg_offset_db} dB")
+		self._zoom_enabled_btn.blockSignals(True)
+		self._zoom_enabled_btn.setChecked(bool(zoom_enabled))
+		self._zoom_enabled_btn.blockSignals(False)
+		self._zoom_enabled_btn.setText("Zoom: On" if bool(zoom_enabled) else "Zoom: Off")
+		self._zoom_scale_slider.blockSignals(True)
+		self._zoom_scale_slider.setValue(int(round(zoom_scale * 10.0)))
+		self._zoom_scale_slider.blockSignals(False)
+		self._zoom_scale_label.setText(f"Zoom: {zoom_scale:.1f}x")
+		self._set_zoom_controls_enabled(bool(zoom_enabled))
 
 		self._controller.set_display_window_db(low_db=float(low_db), high_db=float(high_db))
 		self._controller.set_palette(self._selected_palette_name())
@@ -821,6 +921,8 @@ class MainWindow(QMainWindow):
 			offset_db=float(tvg_offset_db),
 		)
 		self._controller.set_tvg_enabled(bool(tvg_enabled))
+		self._controller.set_zoom_scale(zoom_scale)
+		self._controller.set_zoom_enabled(bool(zoom_enabled))
 
 	def _load_saved_annotator(self) -> None:
 		saved_name = self._settings.value("measurement/annotator_name", "", type=str)
@@ -910,6 +1012,8 @@ class MainWindow(QMainWindow):
 
 	def _on_cart_mouse_left(self) -> None:
 		self._set_cursor_readout(None)
+		if self._zoom_box_start_px is not None:
+			self._clear_zoom_box_selection(refresh=True)
 
 	def _on_cart_mouse_moved(self, pos_obj: object) -> None:
 		if self._cart_pixmap is None:
@@ -919,10 +1023,35 @@ class MainWindow(QMainWindow):
 		if pixel is None:
 			self._set_cursor_readout(None)
 			return
+		if self._zoom_box_start_px is not None:
+			self._zoom_box_current_px = pixel
+			self._refresh_pixmaps()
 		world = self._cart_pixel_to_world(pixel[0], pixel[1])
 		self._set_cursor_readout(world)
 
+	def _on_cart_mouse_double_clicked(self, pos_obj: object) -> None:
+		state = self._controller.state()
+		if not state.zoom_enabled:
+			return
+		if self._cart_pixmap is None:
+			return
+		pixel = self._view_pos_to_source_pixel(self._cart_view, self._cart_pixmap, pos_obj)
+		if pixel is None:
+			return
+		world = self._cart_pixel_to_world(pixel[0], pixel[1])
+		if world is None:
+			return
+		self._controller.set_zoom_center_world(world[0], world[1])
+
 	def _on_cart_mouse_pressed(self, pos_obj: object) -> None:
+		if self._cart_pixmap is not None and self._zoom_box_is_available():
+			pixel = self._view_pos_to_source_pixel(self._cart_view, self._cart_pixmap, pos_obj)
+			if pixel is not None:
+				self._zoom_box_start_px = pixel
+				self._zoom_box_current_px = pixel
+				self._refresh_pixmaps()
+				return
+
 		if not self._measurement_mode_enabled:
 			return
 		if self._cart_pixmap is None:
@@ -967,6 +1096,18 @@ class MainWindow(QMainWindow):
 				self._set_status("Measurement failed: could not map selected points to world coordinates.")
 				self._update_measurement_label()
 		self._refresh_pixmaps()
+
+	def _on_cart_mouse_released(self, pos_obj: object) -> None:
+		if self._zoom_box_start_px is None:
+			return
+		if self._cart_pixmap is None:
+			self._clear_zoom_box_selection(refresh=True)
+			return
+		pixel = self._view_pos_to_source_pixel(self._cart_view, self._cart_pixmap, pos_obj)
+		if pixel is not None:
+			self._zoom_box_current_px = pixel
+		self._apply_zoom_box_selection()
+		self._clear_zoom_box_selection(refresh=True)
 
 	def _undo_measurement_click(self) -> None:
 		if not self._measurement_mode_enabled:
@@ -1279,6 +1420,87 @@ class MainWindow(QMainWindow):
 
 		painter.end()
 		return out
+
+	def _draw_zoom_box_overlay(self, scaled_pixmap: QPixmap) -> QPixmap:
+		if self._cart_pixmap is None:
+			return scaled_pixmap
+		if self._zoom_box_start_px is None or self._zoom_box_current_px is None:
+			return scaled_pixmap
+
+		out = scaled_pixmap.copy()
+		painter = QPainter(out)
+		painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+		scale_x = out.width() / self._cart_pixmap.width()
+		scale_y = out.height() / self._cart_pixmap.height()
+
+		start_x = int(round(self._zoom_box_start_px[0] * scale_x))
+		start_y = int(round(self._zoom_box_start_px[1] * scale_y))
+		cur_x = int(round(self._zoom_box_current_px[0] * scale_x))
+		cur_y = int(round(self._zoom_box_current_px[1] * scale_y))
+		left = min(start_x, cur_x)
+		top = min(start_y, cur_y)
+		width = abs(cur_x - start_x)
+		height = abs(cur_y - start_y)
+
+		pen = QPen(QColor(255, 255, 0))
+		pen.setWidth(2)
+		pen.setStyle(Qt.PenStyle.DashLine)
+		painter.setPen(pen)
+		painter.fillRect(left, top, width, height, QColor(255, 255, 0, 40))
+		painter.drawRect(left, top, width, height)
+		painter.end()
+		return out
+
+	def _zoom_box_is_available(self) -> bool:
+		state = self._controller.state()
+		return bool(state.zoom_enabled) and not bool(self._measurement_mode_enabled)
+
+	def _clear_zoom_box_selection(self, *, refresh: bool) -> None:
+		self._zoom_box_start_px = None
+		self._zoom_box_current_px = None
+		if refresh:
+			self._refresh_pixmaps()
+
+	def _apply_zoom_box_selection(self) -> None:
+		start_px = self._zoom_box_start_px
+		end_px = self._zoom_box_current_px
+		frame = self._current_frame
+		state = self._controller.state()
+		if start_px is None or end_px is None or frame is None:
+			return
+		if not state.zoom_enabled:
+			return
+
+		world_a = self._cart_pixel_to_world(start_px[0], start_px[1])
+		world_b = self._cart_pixel_to_world(end_px[0], end_px[1])
+		if world_a is None or world_b is None:
+			return
+
+		rect_width_m = abs(world_b[0] - world_a[0])
+		rect_height_m = abs(world_b[1] - world_a[1])
+		if rect_width_m <= 1e-6 or rect_height_m <= 1e-6:
+			return
+
+		current_width_m = float(frame.cart_x_max_m - frame.cart_x_min_m)
+		current_height_m = float(frame.cart_z_max_m - frame.cart_z_min_m)
+		if current_width_m <= 0.0 or current_height_m <= 0.0:
+			return
+
+		scale_from_width = current_width_m / rect_width_m
+		scale_from_height = current_height_m / rect_height_m
+		relative_scale = min(scale_from_width, scale_from_height)
+		if not np.isfinite(relative_scale):
+			return
+		if relative_scale <= 1.02:
+			return
+
+		target_zoom_scale = float(np.clip(state.zoom_scale * relative_scale, 1.0, 8.0))
+		center_x_m = 0.5 * (world_a[0] + world_b[0])
+		center_z_m = 0.5 * (world_a[1] + world_b[1])
+		self._controller.set_zoom_center_world(center_x_m, center_z_m)
+		self._controller.set_zoom_scale(target_zoom_scale)
+		self._persist_display_preferences()
+		self._set_status(f"Zoomed to box ({target_zoom_scale:.2f}x).")
 
 	@staticmethod
 	def _pixmap_from_bgr(image_bgr) -> QPixmap:
