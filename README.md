@@ -48,7 +48,7 @@ py -3 -m flexview_player
 3. Optional: click `Connect MATLAB (Use MATLAB Decoder)` to switch decoding to MATLAB for verification.
 3. Navigate pings with play/pause, step buttons, timeline, and ping index spinner.
 4. Toggle `Grid` and `Fan Focus` as needed while reviewing the fan view.
-5. Use measurement mode to stage and save distances on the fan view.
+5. Use measurement mode to stage and save line/box/polygon annotations on the fan view.
 
 ## Player Controls
 
@@ -74,9 +74,12 @@ py -3 -m flexview_player
 
 ### Measurement
 
-- `Measure: On/Off [A]`: enable/disable distance measurement mode.
-- Click point A, then point B in the cartesian fan view to stage one measurement.
-- `Ctrl+Z`: undo last click (or last staged measurement if no active click).
+- `Measure: On/Off [A]`: enable/disable annotation mode.
+- `Type`: choose `Line`, `Box`, or `Polygon`.
+- `Line`: click point A, then point B in the cartesian fan view to stage one annotation.
+- `Box`: click and drag a region in the cartesian fan view, then release to stage one annotation.
+- `Polygon`: click vertices point-by-point, then double-click or press `Enter` to close and stage.
+- `Ctrl+Z`: undo last click (or last staged annotation if no active click).
 - `S`: save all staged measurements.
 - `Annotator` button: set the annotator name used in saved measurement files.
 
@@ -94,7 +97,7 @@ py -3 -m flexview_player
 - Display controls: auto intensity, manual dB window (`Low dB`/`High dB`), and palette selection.
 - Optional TVG gain stage applied before display windowing for far-range compensation.
 - Cursor readout in fan view (`x`, `z`, `range`, `angle`).
-- Staged measurement workflow with JSON export.
+- Staged line/box/polygon annotation workflow with JSON export.
 
 ## Measurement Output Files
 
@@ -102,12 +105,16 @@ Saved under:
 
 - `outputs/<dataset_name>/measurements/<annotator_slug>/all_measurements_<annotator_slug>.json`
 - `outputs/<dataset_name>/measurements/<annotator_slug>/ping_<ping_index>_measurements_<annotator_slug>.json`
+- `outputs/<dataset_name>/measurements/<annotator_slug>/all_measurements_<annotator_slug>_<annotation_type>.json`
+- `outputs/<dataset_name>/measurements/<annotator_slug>/ping_<ping_index>_measurements_<annotator_slug>_<annotation_type>.json`
 
 Each measurement includes:
 
 - ping/frame metadata
-- point A and point B in pixel/world coordinates
-- distance in meters
+- `annotation_type` (`line`, `box`, `polygon`)
+- `geometry.points` with pixel/world coordinates for all points
+- `metrics` (type-specific values, for example line length, box area, polygon perimeter)
+- compatibility fields `point_a`, `point_b`, and `distance_m`
 - annotator identity and save timestamp
 
 ## Script Commands (Non-Player Workflows)

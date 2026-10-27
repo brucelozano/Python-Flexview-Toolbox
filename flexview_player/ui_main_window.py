@@ -37,12 +37,11 @@ WorldPoint = tuple[float, float, float, float]
 
 
 @dataclass
-class StagedMeasurement:
-	point_a_px: tuple[float, float]
-	point_b_px: tuple[float, float]
-	world_a: WorldPoint
-	world_b: WorldPoint
-	distance_m: float
+class StagedAnnotation:
+	annotation_type: str
+	points_px: list[tuple[float, float]]
+	points_world: list[WorldPoint]
+	metrics: dict[str, float | int]
 
 
 class ImageViewLabel(QLabel):
@@ -185,6 +184,11 @@ class MainWindow(QMainWindow):
 		self._annotator_btn = QPushButton("Annotator: (set)")
 		self._measure_mode_btn = QPushButton("Measure: Off [A]")
 		self._measure_mode_btn.setCheckable(True)
+		self._annotation_type_label = QLabel("Type:")
+		self._annotation_type_combo = QComboBox()
+		self._annotation_type_combo.addItem("Line", "line")
+		self._annotation_type_combo.addItem("Box", "box")
+		self._annotation_type_combo.addItem("Polygon", "polygon")
 		self._clear_measure_btn = QPushButton("Clear Measure")
 
 		self._polar_view = ImageViewLabel("Polar View (no frame loaded)")
@@ -192,8 +196,13 @@ class MainWindow(QMainWindow):
 		self._polar_pixmap: QPixmap | None = None
 		self._cart_pixmap: QPixmap | None = None
 		self._current_frame: RenderedFrame | None = None
+		self._active_annotation_type = "line"
 		self._measure_current_points_px: list[tuple[float, float]] = []
-		self._staged_measurements: list[StagedMeasurement] = []
+		self._measure_current_points_world: list[WorldPoint] = []
+		self._staged_measurements: list[StagedAnnotation] = []
+		self._box_region_start_px: tuple[float, float] | None = None
+		self._box_region_current_px: tuple[float, float] | None = None
+		self._last_measurement_frame_key: tuple[str, int] | None = None
 		self._measurement_mode_enabled = False
 		self._zoom_box_start_px: tuple[float, float] | None = None
 		self._zoom_box_current_px: tuple[float, float] | None = None
@@ -228,6 +237,7 @@ class MainWindow(QMainWindow):
 		self._build_layout()
 		self._wire_signals()
 		self._load_saved_display_preferences()
+		self._load_saved_measurement_preferences()
 		self._controller.state_changed.emit(self._controller.state())
 		QTimer.singleShot(0, self._sync_cartesian_render_target_initial)
 
@@ -303,6 +313,8 @@ class MainWindow(QMainWindow):
 		transport.addWidget(self._fan_focus_btn)
 		transport.addWidget(self._annotator_btn)
 		transport.addWidget(self._measure_mode_btn)
+		transport.addWidget(self._annotation_type_label)
+		transport.addWidget(self._annotation_type_combo)
 		transport.addWidget(self._clear_measure_btn)
 		root_layout.addLayout(transport)
 
@@ -350,12 +362,12 @@ class MainWindow(QMainWindow):
 		self._connect_btn.clicked.connect(self._controller.connect_matlab)
 		self._disconnect_btn.clicked.connect(self._controller.disconnect_matlab)
 
-		self._play_btn.clicked.connect(self._controller.toggle_play)
-		self._step_fwd_btn.clicked.connect(self._controller.step_forward)
-		self._step_back_btn.clicked.connect(self._controller.step_back)
-		self._ping_spin.valueChanged.connect(self._controller.set_ping_index)
+		self._play_btn.clicked.connect(self._on_play_requested)
+		self._step_fwd_btn.clicked.connect(self._on_step_forward_requested)
+		self._step_back_btn.clicked.connect(self._on_step_back_requested)
+		self._ping_spin.valueChanged.connect(self._on_ping_index_requested)
 		self._speed_combo.currentTextChanged.connect(self._on_speed_changed)
-		self._timeline.valueChanged.connect(self._controller.set_ping_index)
+		self._timeline.valueChanged.connect(self._on_ping_index_requested)
 		self._auto_intensity_btn.toggled.connect(self._on_auto_intensity_toggled)
 		self._low_db_slider.valueChanged.connect(self._on_display_low_db_changed)
 		self._high_db_slider.valueChanged.connect(self._on_display_high_db_changed)
@@ -371,6 +383,7 @@ class MainWindow(QMainWindow):
 		self._fan_focus_btn.toggled.connect(self._on_fan_focus_toggled)
 		self._annotator_btn.clicked.connect(self._on_annotator_clicked)
 		self._measure_mode_btn.toggled.connect(self._on_measure_mode_toggled)
+		self._annotation_type_combo.currentIndexChanged.connect(self._on_annotation_type_changed)
 		self._clear_measure_btn.clicked.connect(self._clear_measurement)
 
 		self._controller.status_message.connect(self._set_status)
@@ -387,12 +400,12 @@ class MainWindow(QMainWindow):
 		self._shortcut_toggle_grid.activatedAmbiguously.connect(self._toggle_grid_mode)
 		self._shortcut_toggle_fan_focus.activated.connect(self._toggle_fan_focus)
 		self._shortcut_toggle_fan_focus.activatedAmbiguously.connect(self._toggle_fan_focus)
-		self._shortcut_toggle_play.activated.connect(self._controller.toggle_play)
-		self._shortcut_toggle_play.activatedAmbiguously.connect(self._controller.toggle_play)
-		self._shortcut_step_back.activated.connect(self._controller.step_back)
-		self._shortcut_step_back.activatedAmbiguously.connect(self._controller.step_back)
-		self._shortcut_step_fwd.activated.connect(self._controller.step_forward)
-		self._shortcut_step_fwd.activatedAmbiguously.connect(self._controller.step_forward)
+		self._shortcut_toggle_play.activated.connect(self._on_play_requested)
+		self._shortcut_toggle_play.activatedAmbiguously.connect(self._on_play_requested)
+		self._shortcut_step_back.activated.connect(self._on_step_back_requested)
+		self._shortcut_step_back.activatedAmbiguously.connect(self._on_step_back_requested)
+		self._shortcut_step_fwd.activated.connect(self._on_step_forward_requested)
+		self._shortcut_step_fwd.activatedAmbiguously.connect(self._on_step_forward_requested)
 
 	def eventFilter(self, watched, event) -> bool:  # type: ignore[override]
 		if event.type() != QEvent.Type.KeyPress:
@@ -420,6 +433,9 @@ class MainWindow(QMainWindow):
 		if key == Qt.Key.Key_Z and normalized_modifiers == Qt.KeyboardModifier.ControlModifier:
 			self._undo_measurement_click()
 			return True
+		if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and normalized_modifiers == Qt.KeyboardModifier.NoModifier:
+			if self._finalize_polygon_annotation():
+				return True
 		return super().eventFilter(watched, event)
 
 	def _on_open_file(self) -> None:
@@ -432,6 +448,79 @@ class MainWindow(QMainWindow):
 		)
 		if path:
 			self._controller.open_imb_file(path)
+
+	def _has_unsaved_annotations(self) -> bool:
+		return bool(
+			self._staged_measurements
+			or self._measure_current_points_world
+			or self._box_region_start_px is not None
+		)
+
+	def _restore_ping_controls_to_current_state(self) -> None:
+		state = self._controller.state()
+		current_index = int(state.current_ping_index)
+		self._ping_spin.blockSignals(True)
+		self._ping_spin.setValue(current_index)
+		self._ping_spin.blockSignals(False)
+		self._timeline.blockSignals(True)
+		self._timeline.setValue(current_index)
+		self._timeline.blockSignals(False)
+
+	def _confirm_unsaved_annotations(self, *, action_label: str) -> bool:
+		if not self._has_unsaved_annotations():
+			return True
+		reply = QMessageBox.question(
+			self,
+			"Unsaved Annotations",
+			(
+				f"You have unsaved annotations.\n\n"
+				f"Before you {action_label}, choose an option:\n"
+				"- Save: write annotations and continue\n"
+				"- Discard: clear annotations and continue\n"
+				"- Cancel: keep annotations and stay on this frame"
+			),
+			QMessageBox.StandardButton.Save
+			| QMessageBox.StandardButton.Discard
+			| QMessageBox.StandardButton.Cancel,
+			QMessageBox.StandardButton.Save,
+		)
+		if reply == QMessageBox.StandardButton.Save:
+			self._save_measurement()
+			if self._has_unsaved_annotations():
+				self._set_status(f"Blocked {action_label}: annotations are still unsaved.")
+				return False
+			return True
+		if reply == QMessageBox.StandardButton.Discard:
+			self._clear_measurement()
+			return True
+		self._set_status(f"Cancelled {action_label}: kept unsaved annotations.")
+		return False
+
+	def _on_play_requested(self) -> None:
+		state = self._controller.state()
+		if not bool(state.is_playing) and not self._confirm_unsaved_annotations(action_label="start playback"):
+			return
+		self._controller.toggle_play()
+
+	def _on_step_forward_requested(self) -> None:
+		if not self._confirm_unsaved_annotations(action_label="go to the next frame"):
+			return
+		self._controller.step_forward()
+
+	def _on_step_back_requested(self) -> None:
+		if not self._confirm_unsaved_annotations(action_label="go to the previous frame"):
+			return
+		self._controller.step_back()
+
+	def _on_ping_index_requested(self, ping_index: int) -> None:
+		state = self._controller.state()
+		target_index = max(0, int(ping_index))
+		if target_index == int(state.current_ping_index):
+			return
+		if not self._confirm_unsaved_annotations(action_label="change frame"):
+			self._restore_ping_controls_to_current_state()
+			return
+		self._controller.set_ping_index(target_index)
 
 	def _on_speed_changed(self, value: str) -> None:
 		try:
@@ -572,6 +661,21 @@ class MainWindow(QMainWindow):
 			self._set_status(f"Annotator set to '{self._annotator_name}'.")
 			self._update_measurement_label()
 
+	def _on_annotation_type_changed(self, _: int) -> None:
+		selected = self._annotation_type_combo.currentData()
+		if not isinstance(selected, str) or not selected:
+			return
+		if selected == self._active_annotation_type:
+			return
+		self._active_annotation_type = selected
+		self._measure_current_points_px.clear()
+		self._measure_current_points_world.clear()
+		self._clear_box_region_selection(refresh=False)
+		self._settings.setValue("measurement/annotation_type", self._active_annotation_type)
+		self._set_status(f"Annotation type set to {self._active_annotation_type}.")
+		self._update_measurement_label()
+		self._refresh_pixmaps()
+
 	def _on_measure_mode_toggled(self, checked: bool) -> None:
 		self._measurement_mode_enabled = bool(checked)
 		self._measure_mode_btn.setText(
@@ -591,7 +695,7 @@ class MainWindow(QMainWindow):
 				return
 			self._set_status(
 				f"Measurement mode enabled for annotator '{self._annotator_name}'. "
-				"Click point pairs to stage annotations."
+				f"Annotation type: {self._active_annotation_type}."
 			)
 		self._update_measurement_label()
 
@@ -717,19 +821,25 @@ class MainWindow(QMainWindow):
 		mode_text = "ON" if self._measurement_mode_enabled else "OFF"
 		annotator_text = self._annotator_name if self._annotator_name else "(not set)"
 		staged_count = len(self._staged_measurements)
+		type_text = self._active_annotation_type.capitalize()
 		self._measurement_label.setText(
-			f"Mode {mode_text} | Annotator {annotator_text} | Staged {staged_count} | {detail}"
+			f"Mode {mode_text} | Type {type_text} | Annotator {annotator_text} | Staged {staged_count} | {detail}"
 		)
 
 	def _on_frame_ready(self, frame_obj: object) -> None:
 		if not isinstance(frame_obj, RenderedFrame):
 			return
 		frame = frame_obj
+		state = self._controller.state()
+		frame_key = (state.file_path, int(frame.ping_index))
 		self._current_frame = frame
 		self._clear_zoom_box_selection(refresh=False)
+		self._clear_box_region_selection(refresh=False)
 		self._polar_pixmap = self._pixmap_from_bgr(frame.polar_bgr)
 		self._cart_pixmap = self._pixmap_from_bgr(frame.cartesian_bgr)
-		self._reset_measurement_state()
+		if self._last_measurement_frame_key != frame_key:
+			self._reset_measurement_state()
+		self._last_measurement_frame_key = frame_key
 		self._update_measurement_label()
 		self._refresh_pixmaps()
 		self._meta_label.setText(
@@ -784,7 +894,7 @@ class MainWindow(QMainWindow):
 			)
 			if self._grid_toggle_btn.isChecked():
 				scaled = self._draw_grid_overlay(scaled)
-			if self._measure_current_points_px or self._staged_measurements:
+			if self._measure_current_points_world or self._staged_measurements or self._box_region_start_px is not None:
 				scaled = self._draw_measurement_overlay(scaled)
 			if self._zoom_box_start_px is not None and self._zoom_box_current_px is not None:
 				scaled = self._draw_zoom_box_overlay(scaled)
@@ -798,7 +908,9 @@ class MainWindow(QMainWindow):
 
 	def _reset_measurement_state(self) -> None:
 		self._measure_current_points_px.clear()
+		self._measure_current_points_world.clear()
 		self._staged_measurements.clear()
+		self._clear_box_region_selection(refresh=False)
 
 	def _selected_palette_name(self) -> str:
 		selected = self._palette_combo.currentData()
@@ -947,6 +1059,19 @@ class MainWindow(QMainWindow):
 		else:
 			self._update_annotator_button()
 
+	def _load_saved_measurement_preferences(self) -> None:
+		saved_type = str(self._settings.value("measurement/annotation_type", "line", type=str) or "line")
+		idx = self._annotation_type_combo.findData(saved_type)
+		if idx < 0:
+			idx = self._annotation_type_combo.findData("line")
+		if idx < 0:
+			idx = 0
+		self._annotation_type_combo.blockSignals(True)
+		self._annotation_type_combo.setCurrentIndex(idx)
+		self._annotation_type_combo.blockSignals(False)
+		selected = self._annotation_type_combo.currentData()
+		self._active_annotation_type = selected if isinstance(selected, str) and selected else "line"
+
 	def _update_annotator_button(self) -> None:
 		if self._annotator_name:
 			self._annotator_btn.setText(f"Annotator: {self._annotator_name}")
@@ -998,38 +1123,70 @@ class MainWindow(QMainWindow):
 			return True
 		return self._prompt_for_annotator(required=True)
 
-	def _update_measurement_label(self, *, last_distance_m: float | None = None) -> None:
+	def _update_measurement_label(self, *, last_metric_text: str | None = None) -> None:
 		if not self._measurement_mode_enabled:
 			self._set_measurement_summary("Click 'Measure' or press A.")
 			return
 
+		annotation_type = self._active_annotation_type
+		in_progress_count = len(self._measure_current_points_world)
 		staged_count = len(self._staged_measurements)
-		if len(self._measure_current_points_px) == 1:
-			point_a = self._measure_current_points_px[0]
-			world_a = self._cart_pixel_to_world(point_a[0], point_a[1])
-			if world_a is not None:
-				self._set_measurement_summary(
-					f"Point A: x={world_a[0]:.2f} m, z={world_a[1]:.2f} m | Click point B | Ctrl+Z=undo."
-				)
-			else:
-				self._set_measurement_summary("Point A set | Click point B | Ctrl+Z=undo.")
+		if annotation_type == "line":
+			if in_progress_count == 1:
+				world_a = self._measure_current_points_world[0]
+				if world_a is not None:
+					self._set_measurement_summary(
+						f"Point A: x={world_a[0]:.2f} m, z={world_a[1]:.2f} m | Click point B | Ctrl+Z=undo."
+					)
+				else:
+					self._set_measurement_summary("Point A set | Click point B | Ctrl+Z=undo.")
+				return
+			if staged_count > 0:
+				if last_metric_text is not None:
+					self._set_measurement_summary(
+						f"Last {last_metric_text} | Click A then B | Ctrl+Z=undo, S=save."
+					)
+				else:
+					self._set_measurement_summary("Click A then B for next | Ctrl+Z=undo, S=save.")
+				return
+			self._set_measurement_summary("Click point A then B | Ctrl+Z=undo, S=save.")
+			return
+		if annotation_type == "box":
+			if self._box_region_start_px is not None and self._box_region_current_px is not None:
+				self._set_measurement_summary("Drag box region and release | Ctrl+Z=undo, S=save.")
+				return
+			if staged_count > 0:
+				if last_metric_text is not None:
+					self._set_measurement_summary(
+						f"Last {last_metric_text} | Drag next box | Ctrl+Z=undo, S=save."
+					)
+				else:
+					self._set_measurement_summary("Drag next box region | Ctrl+Z=undo, S=save.")
+				return
+			self._set_measurement_summary("Click and drag to draw box region | Ctrl+Z=undo, S=save.")
 			return
 
+		if in_progress_count > 0:
+			self._set_measurement_summary(
+				f"Vertices: {in_progress_count} | Double-click or Enter to close | Ctrl+Z=undo, S=save."
+			)
+			return
 		if staged_count > 0:
-			if last_distance_m is not None:
+			if last_metric_text is not None:
 				self._set_measurement_summary(
-					f"Last distance: {last_distance_m:.2f} m | Click A then B | Ctrl+Z=undo, S=save."
+					f"Last {last_metric_text} | Click vertices for next polygon | Ctrl+Z=undo, S=save."
 				)
 			else:
-				self._set_measurement_summary("Click A then B for next | Ctrl+Z=undo, S=save.")
+				self._set_measurement_summary("Click vertices for next polygon | Ctrl+Z=undo, S=save.")
 			return
-
-		self._set_measurement_summary("Click point A then B | Ctrl+Z=undo, S=save.")
+		self._set_measurement_summary("Click polygon vertices | Double-click or Enter to close | Ctrl+Z=undo, S=save.")
 
 	def _on_cart_mouse_left(self) -> None:
 		self._set_cursor_readout(None)
 		if self._zoom_box_start_px is not None:
 			self._clear_zoom_box_selection(refresh=True)
+		if self._box_region_start_px is not None:
+			self._clear_box_region_selection(refresh=True)
 
 	def _on_cart_mouse_moved(self, pos_obj: object) -> None:
 		if self._cart_pixmap is None:
@@ -1042,10 +1199,17 @@ class MainWindow(QMainWindow):
 		if self._zoom_box_start_px is not None:
 			self._zoom_box_current_px = pixel
 			self._refresh_pixmaps()
+		if self._box_region_start_px is not None:
+			self._box_region_current_px = pixel
+			self._refresh_pixmaps()
 		world = self._cart_pixel_to_world(pixel[0], pixel[1])
 		self._set_cursor_readout(world)
 
 	def _on_cart_mouse_double_clicked(self, pos_obj: object) -> None:
+		if self._measurement_mode_enabled:
+			if self._active_annotation_type == "polygon":
+				self._finalize_polygon_annotation()
+			return
 		state = self._controller.state()
 		if not state.zoom_enabled:
 			return
@@ -1075,45 +1239,47 @@ class MainWindow(QMainWindow):
 		pixel = self._view_pos_to_source_pixel(self._cart_view, self._cart_pixmap, pos_obj)
 		if pixel is None:
 			return
+		if self._active_annotation_type == "box":
+			self._box_region_start_px = pixel
+			self._box_region_current_px = pixel
+			self._update_measurement_label()
+			self._refresh_pixmaps()
+			return
 		world = self._cart_pixel_to_world(pixel[0], pixel[1])
 		if world is None:
 			return
-
 		self._measure_current_points_px.append(pixel)
-		if len(self._measure_current_points_px) == 1:
+		self._measure_current_points_world.append(world)
+		annotation_type = self._active_annotation_type
+		if annotation_type == "polygon":
+			self._update_measurement_label()
+		elif len(self._measure_current_points_world) == 1:
 			self._update_measurement_label()
 		else:
-			world_a = self._cart_pixel_to_world(
-				self._measure_current_points_px[0][0], self._measure_current_points_px[0][1]
-			)
-			world_b = self._cart_pixel_to_world(
-				self._measure_current_points_px[1][0], self._measure_current_points_px[1][1]
-			)
-			if world_a is not None and world_b is not None:
-				dx_m = world_b[0] - world_a[0]
-				dz_m = world_b[1] - world_a[1]
-				distance_m = float(np.hypot(dx_m, dz_m))
-				self._staged_measurements.append(
-					StagedMeasurement(
-						point_a_px=self._measure_current_points_px[0],
-						point_b_px=self._measure_current_points_px[1],
-						world_a=world_a,
-						world_b=world_b,
-						distance_m=distance_m,
-					)
-				)
-				self._measure_current_points_px.clear()
-				self._set_status(
-					f"Staged annotation {len(self._staged_measurements)} ({distance_m:.2f} m). Press S to save all."
-				)
-				self._update_measurement_label(last_distance_m=distance_m)
-			else:
-				self._measure_current_points_px.clear()
-				self._set_status("Measurement failed: could not map selected points to world coordinates.")
-				self._update_measurement_label()
+			self._stage_completed_annotation(annotation_type)
 		self._refresh_pixmaps()
 
 	def _on_cart_mouse_released(self, pos_obj: object) -> None:
+		if self._box_region_start_px is not None:
+			if self._cart_pixmap is None:
+				self._clear_box_region_selection(refresh=True)
+				return
+			pixel = self._view_pos_to_source_pixel(self._cart_view, self._cart_pixmap, pos_obj)
+			if pixel is not None:
+				self._box_region_current_px = pixel
+			start_px = self._box_region_start_px
+			end_px = self._box_region_current_px
+			if (
+				start_px is not None
+				and end_px is not None
+				and (abs(end_px[0] - start_px[0]) > 1e-6 or abs(end_px[1] - start_px[1]) > 1e-6)
+			):
+				self._stage_completed_annotation("box", [start_px, end_px])
+			else:
+				self._set_status("Box annotation cancelled: drag to create a region.")
+				self._update_measurement_label()
+			self._clear_box_region_selection(refresh=True)
+			return
 		if self._zoom_box_start_px is None:
 			return
 		if self._cart_pixmap is None:
@@ -1128,13 +1294,20 @@ class MainWindow(QMainWindow):
 	def _undo_measurement_click(self) -> None:
 		if not self._measurement_mode_enabled:
 			return
-		if self._measure_current_points_px:
+		if self._box_region_start_px is not None:
+			self._clear_box_region_selection(refresh=False)
+			self._set_status("Removed active box region.")
+			self._update_measurement_label()
+			self._refresh_pixmaps()
+			return
+		if self._measure_current_points_world:
 			self._measure_current_points_px.pop()
-			self._set_status("Removed last measurement click.")
+			self._measure_current_points_world.pop()
+			self._set_status("Removed last annotation click.")
 		elif self._staged_measurements:
 			removed = self._staged_measurements.pop()
 			self._set_status(
-				f"Removed last staged annotation ({removed.distance_m:.2f} m)."
+				f"Removed last staged {removed.annotation_type} annotation."
 			)
 		else:
 			self._set_status("Nothing to undo: no points or staged annotations.")
@@ -1149,16 +1322,13 @@ class MainWindow(QMainWindow):
 		if not self._ensure_annotator():
 			self._set_status("Cannot save measurement: annotator name is required.")
 			return
-		if len(self._measure_current_points_px) == 1:
+		if self._measure_current_points_world or self._box_region_start_px is not None:
 			self._set_status(
-				"Cannot save measurement: current annotation is incomplete. Set point B or press Z to undo."
+				"Cannot save measurement: current annotation is incomplete. Finish it or press Ctrl+Z to undo."
 			)
 			return
 		if not self._staged_measurements:
-			if self._measure_current_points_px:
-				self._set_status("Cannot save measurement: complete point B before saving.")
-			else:
-				self._set_status("Cannot save measurement: no staged annotations.")
+			self._set_status("Cannot save measurement: no staged annotations.")
 			return
 
 		state = self._controller.state()
@@ -1173,35 +1343,35 @@ class MainWindow(QMainWindow):
 		try:
 			all_measurements = self._read_measurements_array(all_measurements_path)
 			ping_measurements = self._read_measurements_array(ping_measurements_path)
+			staged_types = list(dict.fromkeys(staged.annotation_type for staged in self._staged_measurements))
+			type_all_measurements: dict[str, list[dict]] = {}
+			type_ping_measurements: dict[str, list[dict]] = {}
+			type_paths: dict[str, tuple[Path, Path]] = {}
+			for annotation_type in staged_types:
+				type_all_path, type_ping_path = self._measurement_type_paths(
+					measurements_dir=save_dir,
+					ping_index=frame.ping_index,
+					annotator_slug=self._annotator_slug,
+					annotation_type=annotation_type,
+				)
+				type_paths[annotation_type] = (type_all_path, type_ping_path)
+				type_all_measurements[annotation_type] = self._read_measurements_array(type_all_path)
+				type_ping_measurements[annotation_type] = self._read_measurements_array(type_ping_path)
 		except ValueError as exc:
 			self._set_status(f"Cannot save measurement: {exc}")
 			return
-
-		replaced_existing = False
-		existing_ping_count = len(ping_measurements)
-		if existing_ping_count > 0:
-			should_replace = self._confirm_replace_existing_frame_measurements(
-				ping_index=frame.ping_index,
-				ping_measurements_path=ping_measurements_path,
-				existing_count=existing_ping_count,
-				annotator_name=self._annotator_name,
-			)
-			if not should_replace:
-				self._set_status("Save cancelled: kept existing frame measurements.")
-				return
-			all_measurements = self._remove_measurements_for_frame(
-				all_measurements=all_measurements,
-				source_file=state.file_path,
-				ping_index=frame.ping_index,
-				annotator_slug=self._annotator_slug,
-			)
-			ping_measurements = []
-			replaced_existing = True
 
 		measurement_seq = self._next_measurement_sequence(all_measurements)
 		ping_measurement_seq = len(ping_measurements) + 1
 		staged_count = len(self._staged_measurements)
 		for idx, staged in enumerate(self._staged_measurements):
+			geometry_points = [
+				self._measurement_point_payload(staged.points_px[i], staged.points_world[i])
+				for i in range(len(staged.points_px))
+			]
+			point_a = geometry_points[0]
+			point_b = geometry_points[-1]
+			distance_m = self._distance_between_world_points(staged.points_world[0], staged.points_world[-1])
 			payload = {
 				"measurement_id": f"M{measurement_seq + idx:06d}",
 				"ping_measurement_index": ping_measurement_seq + idx,
@@ -1214,41 +1384,248 @@ class MainWindow(QMainWindow):
 				"frame_shape": {"rows": frame.shape[0], "cols": frame.shape[1]},
 				"beam_deg": {"min": frame.beam_min_deg, "max": frame.beam_max_deg},
 				"range_m": {"min": frame.range_min_m, "max": frame.range_max_m},
-				"point_a": {
-					"pixel_u": staged.point_a_px[0],
-					"pixel_v": staged.point_a_px[1],
-					"x_m": staged.world_a[0],
-					"z_m": staged.world_a[1],
-					"range_m": staged.world_a[2],
-					"angle_deg": staged.world_a[3],
+				"annotation_type": staged.annotation_type,
+				"geometry": {
+					"points": geometry_points,
+					"closed": staged.annotation_type in ("box", "polygon"),
 				},
-				"point_b": {
-					"pixel_u": staged.point_b_px[0],
-					"pixel_v": staged.point_b_px[1],
-					"x_m": staged.world_b[0],
-					"z_m": staged.world_b[1],
-					"range_m": staged.world_b[2],
-					"angle_deg": staged.world_b[3],
-				},
-				"distance_m": staged.distance_m,
+				"metrics": staged.metrics,
+				"point_a": point_a,
+				"point_b": point_b,
+				"distance_m": distance_m,
 			}
 			all_measurements.append(payload)
 			ping_measurements.append(payload)
+			type_all_measurements[staged.annotation_type].append(payload)
+			type_ping_measurements[staged.annotation_type].append(payload)
 
 		try:
 			self._write_measurements_array(all_measurements_path, all_measurements)
 			self._write_measurements_array(ping_measurements_path, ping_measurements)
+			for annotation_type, (type_all_path, type_ping_path) in type_paths.items():
+				self._write_measurements_array(type_all_path, type_all_measurements[annotation_type])
+				self._write_measurements_array(type_ping_path, type_ping_measurements[annotation_type])
 		except OSError as exc:
 			self._set_status(f"Failed to save measurement: {exc}")
 			return
 
-		action_verb = "Replaced" if replaced_existing else "Saved"
+		type_summary = ", ".join(staged_types)
 		self._set_status(
-			f"{action_verb} {staged_count} annotation(s): {all_measurements_path.name} and {ping_measurements_path.name}"
+			f"Saved {staged_count} annotation(s) to canonical + type files ({type_summary})."
 		)
 		self._reset_measurement_state()
 		self._update_measurement_label()
 		self._refresh_pixmaps()
+
+	def _finalize_polygon_annotation(self) -> bool:
+		if not self._measurement_mode_enabled:
+			return False
+		if self._active_annotation_type != "polygon":
+			return False
+		if not self._measure_current_points_world:
+			return False
+		if len(self._measure_current_points_world) < 3:
+			self._set_status("Polygon needs at least 3 vertices.")
+			self._update_measurement_label()
+			self._refresh_pixmaps()
+			return True
+		self._stage_completed_annotation("polygon")
+		self._refresh_pixmaps()
+		return True
+
+	def _stage_completed_annotation(
+		self,
+		annotation_type: str,
+		points_px: list[tuple[float, float]] | None = None,
+		points_world: list[WorldPoint] | None = None,
+	) -> None:
+		active_points = list(points_px) if points_px is not None else list(self._measure_current_points_px)
+		active_world = list(points_world) if points_world is not None else list(self._measure_current_points_world)
+		staged = self._build_staged_annotation(annotation_type, active_points, active_world)
+		if staged is None:
+			self._measure_current_points_px.clear()
+			self._measure_current_points_world.clear()
+			self._set_status("Annotation failed: could not compute geometry from selected points.")
+			self._update_measurement_label()
+			return
+		self._staged_measurements.append(staged)
+		self._measure_current_points_px.clear()
+		self._measure_current_points_world.clear()
+		metric_text = self._annotation_metric_text(staged)
+		self._set_status(
+			f"Staged annotation {len(self._staged_measurements)} ({metric_text}). Press S to save all."
+		)
+		self._update_measurement_label(last_metric_text=metric_text)
+
+	def _build_staged_annotation(
+		self,
+		annotation_type: str,
+		points_px: list[tuple[float, float]],
+		points_world: list[WorldPoint] | None = None,
+	) -> StagedAnnotation | None:
+		if annotation_type == "line":
+			if len(points_px) != 2:
+				return None
+			if points_world is not None and len(points_world) != len(points_px):
+				return None
+			world_points = list(points_world) if points_world is not None else self._points_px_to_world(points_px)
+			if world_points is None:
+				return None
+			metrics = self._line_metrics(world_points[0], world_points[1])
+			return StagedAnnotation(
+				annotation_type="line",
+				points_px=list(points_px),
+				points_world=world_points,
+				metrics=metrics,
+			)
+
+		if annotation_type == "box":
+			if len(points_px) != 2:
+				return None
+			box_points_px = self._box_points_from_diagonal(points_px[0], points_px[1])
+			world_points = self._points_px_to_world(box_points_px)
+			if world_points is None:
+				return None
+			metrics = self._box_metrics(world_points)
+			if float(metrics["width_m"]) <= 1e-6 or float(metrics["height_m"]) <= 1e-6:
+				return None
+			return StagedAnnotation(
+				annotation_type="box",
+				points_px=box_points_px,
+				points_world=world_points,
+				metrics=metrics,
+			)
+
+		if annotation_type == "polygon":
+			if len(points_px) < 3:
+				return None
+			if points_world is not None and len(points_world) != len(points_px):
+				return None
+			world_points = list(points_world) if points_world is not None else self._points_px_to_world(points_px)
+			if world_points is None:
+				return None
+			metrics = self._polygon_metrics(world_points)
+			return StagedAnnotation(
+				annotation_type="polygon",
+				points_px=list(points_px),
+				points_world=world_points,
+				metrics=metrics,
+			)
+
+		return None
+
+	def _points_px_to_world(self, points_px: list[tuple[float, float]]) -> list[WorldPoint] | None:
+		points_world: list[WorldPoint] = []
+		for point_u, point_v in points_px:
+			world = self._cart_pixel_to_world(point_u, point_v)
+			if world is None:
+				return None
+			points_world.append(world)
+		return points_world
+
+	@staticmethod
+	def _distance_between_world_points(point_a: WorldPoint, point_b: WorldPoint) -> float:
+		return float(np.hypot(point_b[0] - point_a[0], point_b[1] - point_a[1]))
+
+	@staticmethod
+	def _line_metrics(point_a: WorldPoint, point_b: WorldPoint) -> dict[str, float]:
+		length_m = MainWindow._distance_between_world_points(point_a, point_b)
+		return {"length_m": length_m}
+
+	@staticmethod
+	def _box_points_from_diagonal(
+		point_a_px: tuple[float, float],
+		point_b_px: tuple[float, float],
+	) -> list[tuple[float, float]]:
+		min_u = min(point_a_px[0], point_b_px[0])
+		max_u = max(point_a_px[0], point_b_px[0])
+		min_v = min(point_a_px[1], point_b_px[1])
+		max_v = max(point_a_px[1], point_b_px[1])
+		return [
+			(min_u, min_v),
+			(max_u, min_v),
+			(max_u, max_v),
+			(min_u, max_v),
+		]
+
+	@staticmethod
+	def _box_metrics(points_world: list[WorldPoint]) -> dict[str, float]:
+		width_m = abs(points_world[1][0] - points_world[0][0])
+		height_m = abs(points_world[3][1] - points_world[0][1])
+		area_m2 = width_m * height_m
+		perimeter_m = 2.0 * (width_m + height_m)
+		diagonal_m = float(np.hypot(width_m, height_m))
+		aspect_ratio = (width_m / height_m) if height_m > 1e-9 else 0.0
+		return {
+			"width_m": float(width_m),
+			"height_m": float(height_m),
+			"area_m2": float(area_m2),
+			"perimeter_m": float(perimeter_m),
+			"diagonal_m": float(diagonal_m),
+			"aspect_ratio": float(aspect_ratio),
+		}
+
+	@staticmethod
+	def _polygon_metrics(points_world: list[WorldPoint]) -> dict[str, float | int]:
+		vertex_count = len(points_world)
+		x_vals = [point[0] for point in points_world]
+		z_vals = [point[1] for point in points_world]
+		perimeter_m = 0.0
+		twice_area_signed = 0.0
+		for idx in range(vertex_count):
+			next_idx = (idx + 1) % vertex_count
+			perimeter_m += float(
+				np.hypot(
+					x_vals[next_idx] - x_vals[idx],
+					z_vals[next_idx] - z_vals[idx],
+				)
+			)
+			twice_area_signed += (x_vals[idx] * z_vals[next_idx]) - (x_vals[next_idx] * z_vals[idx])
+		area_m2 = abs(twice_area_signed) * 0.5
+
+		if abs(twice_area_signed) > 1e-12:
+			centroid_x_num = 0.0
+			centroid_z_num = 0.0
+			for idx in range(vertex_count):
+				next_idx = (idx + 1) % vertex_count
+				cross = (x_vals[idx] * z_vals[next_idx]) - (x_vals[next_idx] * z_vals[idx])
+				centroid_x_num += (x_vals[idx] + x_vals[next_idx]) * cross
+				centroid_z_num += (z_vals[idx] + z_vals[next_idx]) * cross
+			centroid_x_m = centroid_x_num / (3.0 * twice_area_signed)
+			centroid_z_m = centroid_z_num / (3.0 * twice_area_signed)
+		else:
+			centroid_x_m = float(sum(x_vals) / vertex_count)
+			centroid_z_m = float(sum(z_vals) / vertex_count)
+
+		return {
+			"vertex_count": int(vertex_count),
+			"perimeter_m": float(perimeter_m),
+			"area_m2": float(area_m2),
+			"centroid_x_m": float(centroid_x_m),
+			"centroid_z_m": float(centroid_z_m),
+		}
+
+	def _annotation_metric_text(self, annotation: StagedAnnotation) -> str:
+		metrics = annotation.metrics
+		if annotation.annotation_type == "line":
+			return f"length {float(metrics.get('length_m', 0.0)):.2f} m"
+		if annotation.annotation_type == "box":
+			return f"area {float(metrics.get('area_m2', 0.0)):.2f} m^2"
+		return f"area {float(metrics.get('area_m2', 0.0)):.2f} m^2"
+
+	@staticmethod
+	def _measurement_point_payload(
+		point_px: tuple[float, float],
+		world_point: WorldPoint,
+	) -> dict[str, float]:
+		return {
+			"pixel_u": float(point_px[0]),
+			"pixel_v": float(point_px[1]),
+			"x_m": float(world_point[0]),
+			"z_m": float(world_point[1]),
+			"range_m": float(world_point[2]),
+			"angle_deg": float(world_point[3]),
+		}
 
 	def _measurement_paths(self, source_file: str, ping_index: int, annotator_slug: str) -> tuple[Path, Path, Path]:
 		output_root = Path(__file__).resolve().parents[1] / "outputs"
@@ -1260,6 +1637,23 @@ class MainWindow(QMainWindow):
 		)
 		return measurements_dir, all_measurements_path, ping_measurements_path
 
+	def _measurement_type_paths(
+		self,
+		*,
+		measurements_dir: Path,
+		ping_index: int,
+		annotator_slug: str,
+		annotation_type: str,
+	) -> tuple[Path, Path]:
+		type_slug = re.sub(r"[^A-Za-z0-9._-]+", "_", annotation_type.strip().lower()).strip("._-")
+		if not type_slug:
+			type_slug = "unknown"
+		all_type_path = measurements_dir / f"all_measurements_{annotator_slug}_{type_slug}.json"
+		ping_type_path = (
+			measurements_dir / f"ping_{int(ping_index):06d}_measurements_{annotator_slug}_{type_slug}.json"
+		)
+		return all_type_path, ping_type_path
+
 	def _dataset_folder_name(self, source_file: str) -> str:
 		name = Path(source_file).stem.strip() if source_file else ""
 		if not name:
@@ -1267,56 +1661,6 @@ class MainWindow(QMainWindow):
 		# Keep dataset folder names readable and cross-platform safe.
 		safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._")
 		return safe_name or "unknown_dataset"
-
-	def _confirm_replace_existing_frame_measurements(
-		self,
-		*,
-		ping_index: int,
-		ping_measurements_path: Path,
-		existing_count: int,
-		annotator_name: str,
-	) -> bool:
-		reply = QMessageBox.question(
-			self,
-			"Replace Existing Frame Measurements?",
-			(
-				f"Annotator '{annotator_name}' already has {existing_count} saved measurement(s)\n"
-				f"for frame {ping_index}\n"
-				f"in {ping_measurements_path.name}.\n\n"
-				"Do you want to replace them with the current staged annotations?"
-			),
-			QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-			QMessageBox.StandardButton.Cancel,
-		)
-		return reply == QMessageBox.StandardButton.Yes
-
-	def _remove_measurements_for_frame(
-		self,
-		*,
-		all_measurements: list[dict],
-		source_file: str,
-		ping_index: int,
-		annotator_slug: str,
-	) -> list[dict]:
-		filtered: list[dict] = []
-		for entry in all_measurements:
-			if not isinstance(entry, dict):
-				filtered.append(entry)
-				continue
-
-			entry_ping = entry.get("ping_index")
-			try:
-				same_ping = int(float(entry_ping)) == int(ping_index)
-			except (TypeError, ValueError):
-				same_ping = False
-
-			same_source = True if not source_file else entry.get("source_file") == source_file
-			entry_slug = str(entry.get("annotator_slug", "")).strip().lower()
-			same_annotator = (entry_slug == annotator_slug) if entry_slug else True
-			if same_ping and same_source and same_annotator:
-				continue
-			filtered.append(entry)
-		return filtered
 
 	def _next_measurement_sequence(self, all_measurements: list[dict]) -> int:
 		max_seq = 0
@@ -1559,27 +1903,77 @@ class MainWindow(QMainWindow):
 		def _to_display(point_u: float, point_v: float) -> tuple[int, int]:
 			return int(round(point_u * scale_x)), int(round(point_v * scale_y))
 
+		def _world_to_display(world_point: WorldPoint) -> tuple[int, int] | None:
+			source = self._cart_world_to_source_pixel(world_point[0], world_point[1])
+			if source is None:
+				return None
+			return int(round(source[0] * scale_x)), int(round(source[1] * scale_y))
+
+		def _draw_points(points_px: list[tuple[float, float]]) -> list[tuple[int, int]]:
+			display_points: list[tuple[int, int]] = []
+			for point_u, point_v in points_px:
+				disp_x, disp_y = _to_display(point_u, point_v)
+				display_points.append((disp_x, disp_y))
+				painter.drawEllipse(disp_x - 4, disp_y - 4, 8, 8)
+			return display_points
+
+		def _draw_world_points(points_world: list[WorldPoint]) -> list[tuple[int, int]]:
+			display_points: list[tuple[int, int]] = []
+			for world_point in points_world:
+				display = _world_to_display(world_point)
+				if display is None:
+					continue
+				display_points.append(display)
+				painter.drawEllipse(display[0] - 4, display[1] - 4, 8, 8)
+			return display_points
+
+		def _draw_polyline(display_points: list[tuple[int, int]], *, closed: bool) -> None:
+			if len(display_points) < 2:
+				return
+			for idx in range(len(display_points) - 1):
+				painter.drawLine(
+					display_points[idx][0],
+					display_points[idx][1],
+					display_points[idx + 1][0],
+					display_points[idx + 1][1],
+				)
+			if closed:
+				painter.drawLine(
+					display_points[-1][0],
+					display_points[-1][1],
+					display_points[0][0],
+					display_points[0][1],
+				)
+
 		staged_pen = QPen(QColor(0, 128, 128))
 		staged_pen.setWidth(2)
 		painter.setPen(staged_pen)
 		for staged in self._staged_measurements:
-			a_x, a_y = _to_display(staged.point_a_px[0], staged.point_a_px[1])
-			b_x, b_y = _to_display(staged.point_b_px[0], staged.point_b_px[1])
-			painter.drawEllipse(a_x - 4, a_y - 4, 8, 8)
-			painter.drawEllipse(b_x - 4, b_y - 4, 8, 8)
-			painter.drawLine(a_x, a_y, b_x, b_y)
+			display_points = _draw_world_points(staged.points_world)
+			if staged.annotation_type == "line":
+				_draw_polyline(display_points, closed=False)
+			else:
+				_draw_polyline(display_points, closed=True)
 
 		active_pen = QPen(QColor(0, 255, 255))
 		active_pen.setWidth(2)
 		painter.setPen(active_pen)
-		display_points: list[tuple[int, int]] = []
-		for point_u, point_v in self._measure_current_points_px:
-			disp_x, disp_y = _to_display(point_u, point_v)
-			display_points.append((disp_x, disp_y))
-			painter.drawEllipse(disp_x - 4, disp_y - 4, 8, 8)
-
-		if len(display_points) == 2:
-			painter.drawLine(display_points[0][0], display_points[0][1], display_points[1][0], display_points[1][1])
+		display_points = _draw_world_points(self._measure_current_points_world)
+		if self._active_annotation_type == "line":
+			_draw_polyline(display_points, closed=False)
+		elif (
+			self._active_annotation_type == "box"
+			and self._box_region_start_px is not None
+			and self._box_region_current_px is not None
+		):
+			box_points = self._box_points_from_diagonal(
+				self._box_region_start_px,
+				self._box_region_current_px,
+			)
+			box_display = _draw_points(box_points)
+			_draw_polyline(box_display, closed=True)
+		elif self._active_annotation_type == "polygon":
+			_draw_polyline(display_points, closed=False)
 
 		painter.end()
 		return out
@@ -1617,6 +2011,12 @@ class MainWindow(QMainWindow):
 	def _zoom_box_is_available(self) -> bool:
 		state = self._controller.state()
 		return bool(state.zoom_enabled) and not bool(self._measurement_mode_enabled)
+
+	def _clear_box_region_selection(self, *, refresh: bool) -> None:
+		self._box_region_start_px = None
+		self._box_region_current_px = None
+		if refresh:
+			self._refresh_pixmaps()
 
 	def _clear_zoom_box_selection(self, *, refresh: bool) -> None:
 		self._zoom_box_start_px = None
@@ -1664,6 +2064,25 @@ class MainWindow(QMainWindow):
 		self._controller.set_zoom_scale(target_zoom_scale)
 		self._persist_display_preferences()
 		self._set_status(f"Zoomed to box ({target_zoom_scale:.2f}x).")
+
+	@staticmethod
+	def _annotation_metrics_self_check() -> None:
+		world = lambda x, z: (float(x), float(z), float(np.hypot(x, z)), float(np.degrees(np.arctan2(x, z))))
+		line_metrics = MainWindow._line_metrics(world(0.0, 0.0), world(3.0, 4.0))
+		assert abs(float(line_metrics["length_m"]) - 5.0) < 1e-9
+
+		box_metrics = MainWindow._box_metrics(
+			[world(2.0, 5.0), world(-1.0, 5.0), world(-1.0, 1.0), world(2.0, 1.0)]
+		)
+		assert abs(float(box_metrics["width_m"]) - 3.0) < 1e-9
+		assert abs(float(box_metrics["height_m"]) - 4.0) < 1e-9
+		assert abs(float(box_metrics["area_m2"]) - 12.0) < 1e-9
+
+		polygon_metrics = MainWindow._polygon_metrics([world(0.0, 0.0), world(2.0, 0.0), world(2.0, 2.0), world(0.0, 2.0)])
+		assert abs(float(polygon_metrics["perimeter_m"]) - 8.0) < 1e-9
+		assert abs(float(polygon_metrics["area_m2"]) - 4.0) < 1e-9
+		assert abs(float(polygon_metrics["centroid_x_m"]) - 1.0) < 1e-9
+		assert abs(float(polygon_metrics["centroid_z_m"]) - 1.0) < 1e-9
 
 	@staticmethod
 	def _pixmap_from_bgr(image_bgr) -> QPixmap:
