@@ -43,7 +43,9 @@ py -3 -m flexview_player
 
 ## Player Workflow
 
-1. Click `Open` and choose an `.imb` or `.mmb` file.
+1. Click `Open` and choose an `.imb`/`.mmb` file (split MMB segments like `.001` are also supported).
+   - For `.mmb`/`.00x`, the player auto-connects MATLAB decoder before load.
+   - For `.mmb`/`.00x`, the player asks whether to enable pre-render and how many frames to decode per chunk.
 2. Playback uses the Python decoder by default.
 3. Optional: click `Connect MATLAB (Use MATLAB Decoder)` to switch decoding to MATLAB for verification.
 3. Navigate pings with play/pause, step buttons, timeline, and ping index spinner.
@@ -57,6 +59,7 @@ py -3 -m flexview_player
 - `Play/Pause [Space]`: start/stop timed playback.
 - `Previous [Left]`: load previous ping.
 - `Next [Right]`: load next ping.
+- `Prefetch Ahead`: manually queue prefetch from current ping forward (works even when initial pre-render was disabled).
 - `Ping` spinner and `Timeline` slider: jump to any ping index.
 - `Speed`: `0.25x`, `0.5x`, `1.0x`, `2.0x`.
 - `Auto Intensity`: automatic per-ping display windowing for quick visual review.
@@ -70,6 +73,7 @@ py -3 -m flexview_player
 - `Grid: On/Off [G]`: toggle fan-view grid overlay.
 - `Fan Focus: On/Off [F]`: hide/show the polar panel to give the fan view more space.
 - `Zoom: On/Off [Z]`: toggle cartesian zoom mode.
+- `Reset Zoom [R]`: reset zoom quickly when zoom mode is enabled.
 - Polar and cartesian fan views are shown side-by-side.
 
 ### Measurement
@@ -89,6 +93,11 @@ py -3 -m flexview_player
 - Optional MATLAB connect/disconnect from the UI for decoder switching/parity checks.
 - `.imb` / `.mmb` file open + ping-by-ping playback.
 - `.mmb` MVP path uses MATLAB beamforming per ping with default `image_index=0`.
+- Optional rolling `.mmb` prefetch with chunk-size prompt.
+- Manual `Prefetch Ahead` queue for on-demand background decode while annotating.
+- Bottom-right status-bar progress for prefetch jobs (non-blocking for normal prefetch).
+- Decoded-frame disk cache is enabled for playback/pre-render reuse across rewinds and sessions (LRU eviction, 10 GB budget).
+- MMB split sequences (`.mmb`, `.001`, `.002`, ...) are read in canonical order.
 - End-of-file handling while stepping/playing.
 - Polar and cartesian fan rendering per frame.
 - Fan Focus mode (`F`) to prioritize cartesian fan inspection.
@@ -97,16 +106,17 @@ py -3 -m flexview_player
 - Display controls: auto intensity, manual dB window (`Low dB`/`High dB`), and palette selection.
 - Optional TVG gain stage applied before display windowing for far-range compensation.
 - Cursor readout in fan view (`x`, `z`, `range`, `angle`).
+- Per-frame `Ping Time` readout from decoded header metadata (when available in the source header).
 - Staged line/box/polygon annotation workflow with JSON export.
 
 ## Measurement Output Files
 
 Saved under:
 
-- `outputs/<dataset_name>/measurements/<annotator_slug>/all_measurements_<annotator_slug>.json`
-- `outputs/<dataset_name>/measurements/<annotator_slug>/ping_<ping_index>_measurements_<annotator_slug>.json`
-- `outputs/<dataset_name>/measurements/<annotator_slug>/all_measurements_<annotator_slug>_<annotation_type>.json`
-- `outputs/<dataset_name>/measurements/<annotator_slug>/ping_<ping_index>_measurements_<annotator_slug>_<annotation_type>.json`
+- `outputs/<dataset_name>_project/measurements/<annotator_slug>/all_measurements_<annotator_slug>.json`
+- `outputs/<dataset_name>_project/measurements/<annotator_slug>/ping_<ping_index>_measurements_<annotator_slug>.json`
+- `outputs/<dataset_name>_project/measurements/<annotator_slug>/all_measurements_<annotator_slug>_<annotation_type>.json`
+- `outputs/<dataset_name>_project/measurements/<annotator_slug>/ping_<ping_index>_measurements_<annotator_slug>_<annotation_type>.json`
 
 Each measurement includes:
 
@@ -116,6 +126,24 @@ Each measurement includes:
 - `metrics` (type-specific values, for example line length, box area, polygon perimeter)
 - compatibility fields `point_a`, `point_b`, and `distance_m`
 - annotator identity and save timestamp
+
+The player reads legacy measurement JSON from `outputs/<dataset_name>/measurements/...` when the new `_project` location does not exist yet, then continues saving to `_project`.
+
+## Dataset Project State
+
+Per-dataset GUI/session state is saved in:
+
+- `outputs/<dataset_name>_project/project_state.json`
+
+When reopening a dataset, the player restores the saved state (display options, view toggles, playback rate, and last ping index).  
+If no state file exists yet, defaults are applied:
+
+- TVG log slope: `-5 dB/dec`
+- TVG linear slope: `-0.5 dB/m`
+- TVG offset: `-1 dB`
+- palette: `inferno`
+- fan focus: on
+- grid: on
 
 ## Script Commands (Non-Player Workflows)
 

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import math
+import re
+import threading
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
 
 from flexview_py.display import normalize_palette_name
 
@@ -23,6 +25,60 @@ TVG_OFFSET_MIN = -40.0
 TVG_OFFSET_MAX = 40.0
 ZOOM_SCALE_MIN = 1.0
 ZOOM_SCALE_MAX = 8.0
+MMB_PREFETCH_CHUNK_SIZE_DEFAULT = 500
+MMB_PREFETCH_TRIGGER_RATIO = 0.75
+
+
+class _PrefetchWorker(QObject):
+	"""Background decode-cache warm worker."""
+
+	progress = Signal(int, int, int, int)
+	finished = Signal(int, int, int, bool, str)
+
+	def __init__(
+		self,
+		*,
+		data_worker: MatlabDataWorker,
+		file_path: str,
+		start_ping_index: int,
+		frame_count: int,
+		decoder_backend: str,
+		cancel_event: threading.Event,
+	) -> None:
+		super().__init__()
+		self._data_worker = data_worker
+		self._file_path = file_path
+		self._start_ping_index = int(start_ping_index)
+		self._frame_count = max(0, int(frame_count))
+		self._decoder_backend = decoder_backend
+		self._cancel_event = cancel_event
+
+	@Slot()
+	def run(self) -> None:
+		error_message = ""
+		try:
+			loaded, reached_eof = self._data_worker.warm_decoded_range(
+				file_path=self._file_path,
+				start_ping_index=self._start_ping_index,
+				frame_count=self._frame_count,
+				decoder_backend=self._decoder_backend,
+				cancel_event=self._cancel_event,
+				progress_callback=self._on_progress,
+			)
+		except Exception as exc:  # pragma: no cover
+			loaded = 0
+			reached_eof = False
+			error_message = str(exc)
+		self.finished.emit(
+			self._start_ping_index,
+			self._frame_count,
+			int(loaded),
+			bool(reached_eof),
+			error_message,
+		)
+
+	def _on_progress(self, start: int, count: int, loaded: int, ping_index: int) -> None:
+		self.progress.emit(int(start), int(count), int(loaded), int(ping_index))
 
 
 @dataclass
@@ -56,6 +112,7 @@ class PlaybackController(QObject):
 	status_message = Signal(str)
 	state_changed = Signal(object)
 	frame_ready = Signal(object)
+	prefetch_event = Signal(object)
 
 	def __init__(self) -> None:
 		super().__init__()
@@ -67,9 +124,73 @@ class PlaybackController(QObject):
 		self._timer = QTimer(self)
 		self._timer.timeout.connect(self._on_timer_tick)
 		self._set_timer_interval()
+		self._mmb_prefetch_enabled = False
+		self._mmb_prefetch_chunk_size = MMB_PREFETCH_CHUNK_SIZE_DEFAULT
+		self._prefetch_trigger_ratio = MMB_PREFETCH_TRIGGER_RATIO
+		self._prefetch_loaded_until_exclusive = 0
+		self._prefetch_initial_end_exclusive = 0
+		self._prefetch_reached_eof = False
+		self._prefetch_backend = "python"
+		self._prefetch_wait_target: int | None = None
+		self._prefetch_resume_play = False
+		self._prefetch_pending_request: tuple[int, int, bool, str] | None = None
+		self._prefetch_active = False
+		self._prefetch_thread: QThread | None = None
+		self._prefetch_worker: _PrefetchWorker | None = None
+		self._prefetch_cancel_event = threading.Event()
 
 	def state(self) -> PlayerState:
 		return replace(self._state)
+
+	def configure_mmb_prefetch(self, *, enabled: bool, chunk_size: int) -> None:
+		self._mmb_prefetch_enabled = bool(enabled)
+		self._mmb_prefetch_chunk_size = max(32, int(chunk_size))
+		if self._mmb_prefetch_enabled:
+			self._worker.set_decoded_cache_max(max(64, self._mmb_prefetch_chunk_size * 3))
+		else:
+			self._worker.set_decoded_cache_max(64)
+			self._cancel_prefetch()
+
+	def estimate_frame_count(self, file_path: str, *, allow_slow: bool = True) -> int | None:
+		return self._worker.frame_count(file_path, allow_slow=allow_slow)
+
+	def estimate_cached_contiguous(
+		self,
+		*,
+		file_path: str,
+		start_ping_index: int,
+		decoder_backend: str,
+		max_probe: int = 5000,
+	) -> int:
+		return self._worker.cached_contiguous_count(
+			file_path=file_path,
+			start_ping_index=int(start_ping_index),
+			decoder_backend=decoder_backend,
+			max_probe=max_probe,
+		)
+
+	def refresh_prefetch_window(self) -> None:
+		if not self._state.file_path:
+			return
+		self._configure_prefetch_for_current_file()
+
+	def prefetch_ahead(self, frame_count: int) -> bool:
+		if not self._is_prefetch_supported_for_current_file():
+			self._emit_state("Manual prefetch is available for MMB/.00x files.")
+			return False
+		requested = max(1, int(frame_count))
+		# Keep a reasonable decode cache window for manual-only workflows.
+		self._worker.set_decoded_cache_max(max(64, requested * 3))
+		start_idx = int(self._state.current_ping_index) + 1
+		self._schedule_prefetch_chunk(
+			start_ping_index=start_idx,
+			urgent=True,
+			reason="manual",
+			frame_count_override=requested,
+			allow_when_disabled=True,
+		)
+		self._emit_state(f"Manual prefetch queued for {requested} frame(s) from ping {start_idx}.")
+		return True
 
 	def connect_matlab(self) -> None:
 		try:
@@ -79,6 +200,7 @@ class PlaybackController(QObject):
 			self._emit_state("Connected to MATLAB. Decoder switched to MATLAB.")
 			if self._state.file_path:
 				self._load_frame(self._state.current_ping_index, status=False)
+				self._configure_prefetch_for_current_file()
 		except Exception as exc:  # pragma: no cover
 			self._emit_state(f"Failed to connect MATLAB: {exc}")
 
@@ -91,24 +213,31 @@ class PlaybackController(QObject):
 		self._emit_state("Disconnected from MATLAB. Decoder switched to Python.")
 		if self._state.file_path:
 			self._load_frame(self._state.current_ping_index, status=False)
+			self._configure_prefetch_for_current_file()
 
 	def open_imb_file(self, file_path: str) -> None:
 		path = Path(file_path)
 		if not path.exists():
 			self._emit_state(f"File not found: {file_path}")
 			return
-		if path.suffix.lower() not in {".imb", ".mmb"}:
-			self._emit_state("Please select an .imb or .mmb file for v1 playback.")
+		if not self._is_supported_source(path):
+			self._emit_state("Please select an .imb/.mmb file (or split .001/.002/... segment) for playback.")
 			return
+		self._cancel_prefetch()
 		self._state.file_path = str(path.resolve())
 		self._state.current_ping_index = 0
 		self._state.discovered_max_ping_index = 1000
 		# Re-initialize center when the dataset changes so stale coordinates are not reused.
 		self._state.zoom_center_x_m = float("nan")
 		self._state.zoom_center_z_m = float("nan")
+		self._prefetch_wait_target = None
+		self._prefetch_resume_play = False
+		if self._is_mmb_like(path) and self._mmb_prefetch_enabled:
+			self._worker.set_decoded_cache_max(max(64, self._mmb_prefetch_chunk_size * 3))
 		self._emit_state(f"Loaded file: {self._state.file_path}")
 		if self._decoder_ready():
 			self._load_frame(0, status=True)
+			self._configure_prefetch_for_current_file()
 
 	def toggle_play(self) -> None:
 		if not self._state.file_path:
@@ -303,11 +432,19 @@ class PlaybackController(QObject):
 			if status:
 				self._emit_state("Connect MATLAB first or switch back to Python decoder.")
 			return False
+		requested_ping_index = max(0, int(ping_index))
+		if self._should_wait_for_prefetch(requested_ping_index):
+			self._begin_prefetch_wait(requested_ping_index)
+			if status:
+				self._emit_state(f"Waiting for prefetched frame {requested_ping_index}...")
+			else:
+				self.state_changed.emit(self.state())
+			return False
 
 		try:
 			frame: RenderedFrame = self._worker.load_imb_frame(
 				self._state.file_path,
-				ping_index,
+				requested_ping_index,
 				decoder_backend=self._state.decoder_backend,
 				cart_width_px=self._cart_render_width_px,
 				cart_height_px=self._cart_render_height_px,
@@ -327,7 +464,7 @@ class PlaybackController(QObject):
 				zoom_center_z_m=self._state.zoom_center_z_m,
 			)
 		except Exception as exc:
-			if ping_index > self._state.current_ping_index:
+			if requested_ping_index > self._state.current_ping_index:
 				# Common forward-step failure means EOF.
 				self._state.discovered_max_ping_index = max(
 					self._state.current_ping_index, self._state.discovered_max_ping_index
@@ -342,7 +479,7 @@ class PlaybackController(QObject):
 					self.state_changed.emit(self.state())
 				return False
 			if status:
-				self._emit_state(f"Failed to load ping {ping_index}: {exc}")
+				self._emit_state(f"Failed to load ping {requested_ping_index}: {exc}")
 			return False
 
 		self._state.current_ping_index = int(frame.ping_index)
@@ -350,6 +487,8 @@ class PlaybackController(QObject):
 		self._state.discovered_max_ping_index = max(
 			self._state.discovered_max_ping_index, self._state.current_ping_index + 1
 		)
+		if self._is_prefetch_enabled_for_current_file():
+			self._maybe_schedule_next_prefetch(self._state.current_ping_index)
 		self.frame_ready.emit(frame)
 		if status:
 			self._emit_state(
@@ -362,6 +501,8 @@ class PlaybackController(QObject):
 	def _on_timer_tick(self) -> None:
 		ok = self._load_frame(self._state.current_ping_index + 1, status=False)
 		if not ok:
+			if self._prefetch_wait_target is not None:
+				return
 			self._emit_state(
 				f"Playback stopped at ping index {self._state.current_ping_index} (end/error)."
 			)
@@ -380,6 +521,340 @@ class PlaybackController(QObject):
 		self.state_changed.emit(self.state())
 		if self._decoder_ready() and bool(self._state.file_path) and not self._state.is_playing:
 			self._load_frame(self._state.current_ping_index, status=False)
+
+	def _is_prefetch_enabled_for_current_file(self) -> bool:
+		if not self._mmb_prefetch_enabled:
+			return False
+		return self._is_prefetch_supported_for_current_file()
+
+	def _is_prefetch_supported_for_current_file(self) -> bool:
+		if not self._state.file_path:
+			return False
+		return self._is_mmb_like(Path(self._state.file_path))
+
+	@staticmethod
+	def _is_mmb_like(path: Path) -> bool:
+		suffix = path.suffix.lower()
+		return suffix == ".mmb" or re.fullmatch(r"\.\d{3}", suffix) is not None
+
+	@classmethod
+	def _is_supported_source(cls, path: Path) -> bool:
+		return path.suffix.lower() == ".imb" or cls._is_mmb_like(path)
+
+	def _configure_prefetch_for_current_file(self) -> None:
+		self._cancel_prefetch()
+		self._prefetch_pending_request = None
+		self._prefetch_wait_target = None
+		self._prefetch_resume_play = False
+		self._prefetch_loaded_until_exclusive = 0
+		self._prefetch_initial_end_exclusive = 0
+		self._prefetch_reached_eof = False
+		self._prefetch_backend = self._state.decoder_backend
+		if not self._is_prefetch_enabled_for_current_file():
+			self.prefetch_event.emit({"type": "prefetch_disabled"})
+			return
+		self._prefetch_loaded_until_exclusive = max(
+			0,
+			int(self._state.current_ping_index) + 1,
+		)
+		self._prefetch_initial_end_exclusive = self._prefetch_loaded_until_exclusive + int(
+			self._mmb_prefetch_chunk_size
+		)
+		self.prefetch_event.emit(
+			{
+				"type": "prefetch_ready",
+				"chunk_size": int(self._mmb_prefetch_chunk_size),
+				"loaded_until_exclusive": int(self._prefetch_loaded_until_exclusive),
+			}
+		)
+		self._schedule_prefetch_chunk(
+			start_ping_index=self._prefetch_loaded_until_exclusive,
+			urgent=False,
+			reason="initial",
+		)
+
+	def _should_wait_for_prefetch(self, ping_index: int) -> bool:
+		if not self._is_prefetch_enabled_for_current_file():
+			return False
+		# After the initial pre-render window, keep classic playback behavior
+		# and let cache misses decode inline without blocking dialogs.
+		if int(ping_index) >= int(self._prefetch_initial_end_exclusive):
+			return False
+		# Only block during the initial pre-render warm-up itself.
+		# If those early frames were later evicted, fallback to normal decode.
+		if int(self._prefetch_loaded_until_exclusive) >= int(self._prefetch_initial_end_exclusive):
+			return False
+		if self._prefetch_reached_eof and ping_index >= self._prefetch_loaded_until_exclusive:
+			return False
+		if self._worker.has_decoded_frame(
+			file_path=self._state.file_path,
+			ping_index=ping_index,
+			decoder_backend=self._state.decoder_backend,
+		):
+			return False
+		return True
+
+	def _begin_prefetch_wait(self, target_ping_index: int) -> None:
+		self._prefetch_wait_target = int(target_ping_index)
+		self.prefetch_event.emit(
+			{
+				"type": "prefetch_waiting",
+				"target_ping_index": int(target_ping_index),
+			}
+		)
+		if self._state.is_playing:
+			self._prefetch_resume_play = True
+			self._state.is_playing = False
+			self._timer.stop()
+			self.state_changed.emit(self.state())
+		chunk_start = (int(target_ping_index) // int(self._mmb_prefetch_chunk_size)) * int(
+			self._mmb_prefetch_chunk_size
+		)
+		self._schedule_prefetch_chunk(
+			start_ping_index=chunk_start,
+			urgent=True,
+			reason="wait_target",
+		)
+
+	def _maybe_schedule_next_prefetch(self, current_ping_index: int) -> None:
+		if not self._is_prefetch_enabled_for_current_file():
+			return
+		if self._prefetch_reached_eof:
+			return
+		if self._prefetch_loaded_until_exclusive <= 0:
+			return
+		trigger_margin = max(
+			1,
+			int(round(float(self._mmb_prefetch_chunk_size) * (1.0 - self._prefetch_trigger_ratio))),
+		)
+		trigger_index = self._prefetch_loaded_until_exclusive - trigger_margin
+		if int(current_ping_index) >= int(trigger_index):
+			self._schedule_prefetch_chunk(
+				start_ping_index=self._prefetch_loaded_until_exclusive,
+				urgent=False,
+				reason="rolling",
+			)
+
+	def _schedule_prefetch_chunk_with_count(
+		self,
+		*,
+		start_ping_index: int,
+		urgent: bool,
+		reason: str,
+		frame_count: int,
+		allow_when_disabled: bool = False,
+	) -> None:
+		if not self._is_prefetch_supported_for_current_file():
+			return
+		if not allow_when_disabled and not self._is_prefetch_enabled_for_current_file():
+			return
+		if self._prefetch_reached_eof and not urgent:
+			return
+		start_idx = max(0, int(start_ping_index))
+		count = max(1, int(frame_count))
+		if not urgent and start_idx < self._prefetch_loaded_until_exclusive:
+			start_idx = self._prefetch_loaded_until_exclusive
+		if self._prefetch_active:
+			if self._prefetch_pending_request is None:
+				self._prefetch_pending_request = (start_idx, count, urgent, reason)
+			else:
+				existing_start, existing_count, existing_urgent, _ = self._prefetch_pending_request
+				combined_start = min(existing_start, start_idx)
+				combined_count = max(existing_count, count)
+				self._prefetch_pending_request = (
+					combined_start,
+					combined_count,
+					existing_urgent or urgent,
+					"queued",
+				)
+			return
+		self._start_prefetch_chunk(
+			start_ping_index=start_idx,
+			frame_count=count,
+			urgent=urgent,
+			reason=reason,
+		)
+
+	def _schedule_prefetch_chunk(
+		self,
+		*,
+		start_ping_index: int,
+		urgent: bool,
+		reason: str,
+		frame_count_override: int | None = None,
+		allow_when_disabled: bool = False,
+	) -> None:
+		frame_count = (
+			int(self._mmb_prefetch_chunk_size)
+			if frame_count_override is None
+			else max(1, int(frame_count_override))
+		)
+		self._schedule_prefetch_chunk_with_count(
+			start_ping_index=start_ping_index,
+			urgent=urgent,
+			reason=reason,
+			frame_count=frame_count,
+			allow_when_disabled=allow_when_disabled,
+		)
+
+	def _start_prefetch_chunk(
+		self,
+		*,
+		start_ping_index: int,
+		frame_count: int,
+		urgent: bool,
+		reason: str,
+	) -> None:
+		if not self._state.file_path:
+			return
+		self._prefetch_cancel_event = threading.Event()
+		self._prefetch_active = True
+		self._prefetch_thread = QThread(self)
+		self._prefetch_worker = _PrefetchWorker(
+			data_worker=self._worker,
+			file_path=self._state.file_path,
+			start_ping_index=int(start_ping_index),
+			frame_count=max(1, int(frame_count)),
+			decoder_backend=self._state.decoder_backend,
+			cancel_event=self._prefetch_cancel_event,
+		)
+		self._prefetch_worker.moveToThread(self._prefetch_thread)
+		self._prefetch_thread.started.connect(self._prefetch_worker.run)
+		self._prefetch_worker.progress.connect(self._on_prefetch_progress)
+		self._prefetch_worker.finished.connect(self._on_prefetch_finished)
+		self._prefetch_worker.finished.connect(self._prefetch_thread.quit)
+		self._prefetch_worker.finished.connect(self._prefetch_worker.deleteLater)
+		self._prefetch_thread.finished.connect(self._prefetch_thread.deleteLater)
+		self.prefetch_event.emit(
+			{
+				"type": "prefetch_started",
+				"start_ping_index": int(start_ping_index),
+				"frame_count": max(1, int(frame_count)),
+				"urgent": bool(urgent),
+				"reason": reason,
+			}
+		)
+		self._prefetch_thread.start()
+
+	def _cancel_prefetch(self) -> None:
+		self._prefetch_pending_request = None
+		self._prefetch_active = False
+		if self._prefetch_worker is not None:
+			self._prefetch_cancel_event.set()
+		if self._prefetch_thread is not None and self._prefetch_thread.isRunning():
+			self._prefetch_thread.quit()
+			self._prefetch_thread.wait(250)
+		self._prefetch_worker = None
+		self._prefetch_thread = None
+
+	@Slot(int, int, int, int)
+	def _on_prefetch_progress(
+		self,
+		start_ping_index: int,
+		frame_count: int,
+		loaded_count: int,
+		latest_ping_index: int,
+	) -> None:
+		self.prefetch_event.emit(
+			{
+				"type": "prefetch_progress",
+				"start_ping_index": int(start_ping_index),
+				"frame_count": int(frame_count),
+				"loaded_count": int(loaded_count),
+				"latest_ping_index": int(latest_ping_index),
+				"target_ping_index": self._prefetch_wait_target,
+			}
+		)
+		self._check_prefetch_wait_target_ready()
+
+	@Slot(int, int, int, bool, str)
+	def _on_prefetch_finished(
+		self,
+		start_ping_index: int,
+		frame_count: int,
+		loaded_count: int,
+		reached_eof: bool,
+		error_message: str,
+	) -> None:
+		self._prefetch_active = False
+		self._prefetch_worker = None
+		self._prefetch_thread = None
+		start_idx = int(start_ping_index)
+		loaded = max(0, int(loaded_count))
+		if loaded > 0:
+			chunk_end = start_idx + loaded
+			if start_idx <= self._prefetch_loaded_until_exclusive:
+				self._prefetch_loaded_until_exclusive = max(self._prefetch_loaded_until_exclusive, chunk_end)
+			else:
+				self._prefetch_loaded_until_exclusive = chunk_end
+			self._state.discovered_max_ping_index = max(
+				self._state.discovered_max_ping_index,
+				self._prefetch_loaded_until_exclusive,
+			)
+			self.state_changed.emit(self.state())
+		if bool(reached_eof):
+			self._prefetch_reached_eof = True
+		self.prefetch_event.emit(
+			{
+				"type": "prefetch_finished",
+				"start_ping_index": start_idx,
+				"frame_count": int(frame_count),
+				"loaded_count": loaded,
+				"reached_eof": bool(reached_eof),
+				"error_message": str(error_message or ""),
+				"loaded_until_exclusive": int(self._prefetch_loaded_until_exclusive),
+			}
+		)
+		self._check_prefetch_wait_target_ready()
+		if self._prefetch_pending_request is not None and not self._prefetch_reached_eof:
+			next_start, next_count, next_urgent, next_reason = self._prefetch_pending_request
+			self._prefetch_pending_request = None
+			self._start_prefetch_chunk(
+				start_ping_index=int(next_start),
+				frame_count=max(1, int(next_count)),
+				urgent=bool(next_urgent),
+				reason=str(next_reason),
+			)
+
+	def _check_prefetch_wait_target_ready(self) -> None:
+		target = self._prefetch_wait_target
+		if target is None:
+			return
+		if not self._state.file_path:
+			return
+		if not self._worker.has_decoded_frame(
+			file_path=self._state.file_path,
+			ping_index=int(target),
+			decoder_backend=self._state.decoder_backend,
+		):
+			if self._prefetch_reached_eof and not self._prefetch_active:
+				self._prefetch_wait_target = None
+				self._prefetch_resume_play = False
+				self.prefetch_event.emit(
+					{
+						"type": "prefetch_wait_failed",
+						"target_ping_index": int(target),
+					}
+				)
+			return
+
+		self._prefetch_wait_target = None
+		loaded = self._load_frame(int(target), status=False)
+		self.prefetch_event.emit(
+			{
+				"type": "prefetch_wait_ready",
+				"target_ping_index": int(target),
+				"loaded": bool(loaded),
+			}
+		)
+		if loaded and self._prefetch_resume_play:
+			self._prefetch_resume_play = False
+			self._state.is_playing = True
+			self._set_timer_interval()
+			self._timer.start()
+			self._emit_state("Playback resumed after prefetch catch-up.")
+		elif not loaded:
+			self._prefetch_resume_play = False
 
 	def _decoder_ready(self) -> bool:
 		if self._state.decoder_backend == "python":

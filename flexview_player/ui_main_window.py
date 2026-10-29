@@ -20,6 +20,8 @@ from PySide6.QtWidgets import (
 	QLineEdit,
 	QMainWindow,
 	QMessageBox,
+	QProgressDialog,
+	QProgressBar,
 	QPushButton,
 	QSizePolicy,
 	QSlider,
@@ -34,6 +36,13 @@ from .playback_controller import PlaybackController, PlayerState
 
 
 WorldPoint = tuple[float, float, float, float]
+DEFAULT_PROJECT_PALETTE = "inferno"
+DEFAULT_PROJECT_TVG_LOG_SLOPE = -5.0
+DEFAULT_PROJECT_TVG_LINEAR_SLOPE = -0.5
+DEFAULT_PROJECT_TVG_OFFSET = -1.0
+DEFAULT_PROJECT_TVG_ENABLED = True
+DEFAULT_PROJECT_FAN_FOCUS = True
+DEFAULT_PROJECT_GRID = True
 
 
 @dataclass
@@ -97,6 +106,8 @@ class MainWindow(QMainWindow):
 		self._connected_label = QLabel("Decoder: Python | MATLAB: Disconnected")
 		self._file_label = QLabel("(none)")
 		self._file_label.setWordWrap(True)
+		self._ping_time_label = QLabel("Ping Time: -")
+		self._ping_time_label.setWordWrap(True)
 		self._meta_label = QLabel("Index: - | Ping: - | Size: - | Beam: - | Range: -")
 		self._meta_label.setWordWrap(True)
 		self._cursor_label = QLabel("x: - | z: - | range: - | angle: - | bearing: -")
@@ -112,6 +123,7 @@ class MainWindow(QMainWindow):
 		self._play_btn = QPushButton("Play/Pause [Space]")
 		self._step_back_btn = QPushButton("Previous [Left]")
 		self._step_fwd_btn = QPushButton("Next [Right]")
+		self._prefetch_ahead_btn = QPushButton("Prefetch Ahead")
 		self._ping_spin = QSpinBox()
 		self._ping_spin.setRange(0, 10_000_000)
 		self._speed_combo = QComboBox()
@@ -174,7 +186,7 @@ class MainWindow(QMainWindow):
 		self._zoom_scale_slider.setSingleStep(1)
 		self._zoom_scale_slider.setPageStep(5)
 		self._zoom_scale_slider.setValue(10)
-		self._zoom_reset_btn = QPushButton("Reset Zoom")
+		self._zoom_reset_btn = QPushButton("Reset Zoom [R]")
 		self._grid_toggle_btn = QPushButton("Grid: On [G]")
 		self._grid_toggle_btn.setCheckable(True)
 		self._grid_toggle_btn.setChecked(True)
@@ -209,6 +221,25 @@ class MainWindow(QMainWindow):
 		self._annotator_name = ""
 		self._annotator_slug = ""
 		self._settings = QSettings("Flexview", "FlexviewPlayer")
+		self._mmb_prefetch_enabled = True
+		self._mmb_prefetch_chunk_size = 500
+		self._prefetch_ahead_count = 200
+		self._prefetch_progress_dialog: QProgressDialog | None = None
+		self._prefetch_status_progress = QProgressBar()
+		self._prefetch_status_progress.setVisible(False)
+		self._prefetch_status_progress.setTextVisible(True)
+		self._prefetch_status_progress.setRange(0, 100)
+		self._prefetch_status_progress.setValue(0)
+		self._prefetch_status_progress.setMinimumWidth(460)
+		self._prefetch_status_progress.setMaximumWidth(640)
+		self._project_state_source_file = ""
+		self._project_state_dirty = False
+		self._project_state_loading = False
+		self._project_state_last_ping_index = -1
+		self._project_state_save_timer = QTimer(self)
+		self._project_state_save_timer.setSingleShot(True)
+		self._project_state_save_timer.setInterval(1200)
+		self._project_state_save_timer.timeout.connect(self._flush_project_state_save)
 		self._load_saved_annotator()
 		self._shortcut_toggle_measure = QShortcut(QKeySequence("A"), self)
 		self._shortcut_toggle_grid = QShortcut(QKeySequence("G"), self)
@@ -216,16 +247,19 @@ class MainWindow(QMainWindow):
 		self._shortcut_toggle_play = QShortcut(QKeySequence("Space"), self)
 		self._shortcut_step_back = QShortcut(QKeySequence("Left"), self)
 		self._shortcut_step_fwd = QShortcut(QKeySequence("Right"), self)
+		self._shortcut_zoom_reset = QShortcut(QKeySequence("R"), self)
 		self._shortcut_toggle_measure.setContext(Qt.ShortcutContext.WindowShortcut)
 		self._shortcut_toggle_grid.setContext(Qt.ShortcutContext.WindowShortcut)
 		self._shortcut_toggle_fan_focus.setContext(Qt.ShortcutContext.WindowShortcut)
 		self._shortcut_toggle_play.setContext(Qt.ShortcutContext.WindowShortcut)
 		self._shortcut_step_back.setContext(Qt.ShortcutContext.WindowShortcut)
 		self._shortcut_step_fwd.setContext(Qt.ShortcutContext.WindowShortcut)
+		self._shortcut_zoom_reset.setContext(Qt.ShortcutContext.WindowShortcut)
 		self._shortcut_toggle_measure.setAutoRepeat(False)
 		self._shortcut_toggle_grid.setAutoRepeat(False)
 		self._shortcut_toggle_fan_focus.setAutoRepeat(False)
 		self._shortcut_toggle_play.setAutoRepeat(False)
+		self._shortcut_zoom_reset.setAutoRepeat(False)
 		self._resize_sync_timer = QTimer(self)
 		self._resize_sync_timer.setSingleShot(True)
 		self._resize_sync_timer.setInterval(120)
@@ -271,6 +305,8 @@ class MainWindow(QMainWindow):
 		session_key.setProperty("infoRole", "key")
 		file_key = QLabel("File")
 		file_key.setProperty("infoRole", "key")
+		file_time_key = QLabel("Ping Time")
+		file_time_key.setProperty("infoRole", "key")
 		frame_key = QLabel("Frame")
 		frame_key.setProperty("infoRole", "key")
 		cursor_key = QLabel("Cursor")
@@ -282,12 +318,14 @@ class MainWindow(QMainWindow):
 		info_grid.addWidget(self._connected_label, 0, 1)
 		info_grid.addWidget(file_key, 1, 0)
 		info_grid.addWidget(self._file_label, 1, 1)
-		info_grid.addWidget(frame_key, 2, 0)
-		info_grid.addWidget(self._meta_label, 2, 1)
-		info_grid.addWidget(cursor_key, 3, 0)
-		info_grid.addWidget(self._cursor_label, 3, 1)
-		info_grid.addWidget(measurement_key, 4, 0)
-		info_grid.addWidget(self._measurement_label, 4, 1)
+		info_grid.addWidget(file_time_key, 2, 0)
+		info_grid.addWidget(self._ping_time_label, 2, 1)
+		info_grid.addWidget(frame_key, 3, 0)
+		info_grid.addWidget(self._meta_label, 3, 1)
+		info_grid.addWidget(cursor_key, 4, 0)
+		info_grid.addWidget(self._cursor_label, 4, 1)
+		info_grid.addWidget(measurement_key, 5, 0)
+		info_grid.addWidget(self._measurement_label, 5, 1)
 		root_layout.addWidget(info_panel)
 
 		views_layout = QHBoxLayout()
@@ -300,6 +338,7 @@ class MainWindow(QMainWindow):
 		transport.addWidget(self._step_back_btn)
 		transport.addWidget(self._play_btn)
 		transport.addWidget(self._step_fwd_btn)
+		transport.addWidget(self._prefetch_ahead_btn)
 		transport.addSpacing(8)
 		transport.addWidget(QLabel("Ping:"))
 		transport.addWidget(self._ping_spin)
@@ -355,6 +394,7 @@ class MainWindow(QMainWindow):
 
 		status_bar = QStatusBar(self)
 		status_bar.addWidget(self._status_label, stretch=1)
+		status_bar.addPermanentWidget(self._prefetch_status_progress)
 		self.setStatusBar(status_bar)
 
 	def _wire_signals(self) -> None:
@@ -365,6 +405,7 @@ class MainWindow(QMainWindow):
 		self._play_btn.clicked.connect(self._on_play_requested)
 		self._step_fwd_btn.clicked.connect(self._on_step_forward_requested)
 		self._step_back_btn.clicked.connect(self._on_step_back_requested)
+		self._prefetch_ahead_btn.clicked.connect(self._on_prefetch_ahead_requested)
 		self._ping_spin.valueChanged.connect(self._on_ping_index_requested)
 		self._speed_combo.currentTextChanged.connect(self._on_speed_changed)
 		self._timeline.valueChanged.connect(self._on_ping_index_requested)
@@ -387,6 +428,7 @@ class MainWindow(QMainWindow):
 		self._clear_measure_btn.clicked.connect(self._clear_measurement)
 
 		self._controller.status_message.connect(self._set_status)
+		self._controller.prefetch_event.connect(self._on_prefetch_event)
 		self._controller.state_changed.connect(self._apply_state)
 		self._controller.frame_ready.connect(self._on_frame_ready)
 		self._cart_view.mouse_moved.connect(self._on_cart_mouse_moved)
@@ -406,6 +448,8 @@ class MainWindow(QMainWindow):
 		self._shortcut_step_back.activatedAmbiguously.connect(self._on_step_back_requested)
 		self._shortcut_step_fwd.activated.connect(self._on_step_forward_requested)
 		self._shortcut_step_fwd.activatedAmbiguously.connect(self._on_step_forward_requested)
+		self._shortcut_zoom_reset.activated.connect(self._on_zoom_reset_shortcut)
+		self._shortcut_zoom_reset.activatedAmbiguously.connect(self._on_zoom_reset_shortcut)
 
 	def eventFilter(self, watched, event) -> bool:  # type: ignore[override]
 		if event.type() != QEvent.Type.KeyPress:
@@ -439,15 +483,361 @@ class MainWindow(QMainWindow):
 		return super().eventFilter(watched, event)
 
 	def _on_open_file(self) -> None:
+		previous_file = self._project_state_source_file or self._controller.state().file_path
+		if previous_file:
+			self._flush_project_state_save(force=True)
 		start_dir = str(Path.cwd())
 		path, _ = QFileDialog.getOpenFileName(
 			self,
 			"Select Sonar File",
 			start_dir,
-			"Flexview Sonar Files (*.imb *.IMB *.mmb *.MMB);;All Files (*.*)",
+			"Flexview Sonar Files (*.imb *.IMB *.mmb *.MMB *.0?? *.1?? *.2?? *.3?? *.4?? *.5?? *.6?? *.7?? *.8?? *.9??);;All Files (*.*)",
 		)
-		if path:
-			self._controller.open_imb_file(path)
+		if not path:
+			return
+		ext = Path(path).suffix.lower()
+		is_mmb_like = self._is_mmb_like_path(path)
+		if is_mmb_like:
+			if not self._ensure_matlab_decoder_for_mmb():
+				return
+			prefetch_options = self._prompt_mmb_prefetch_options(path)
+			if prefetch_options is None:
+				return
+			enabled, chunk_size = prefetch_options
+			self._mmb_prefetch_enabled = bool(enabled)
+			self._mmb_prefetch_chunk_size = int(chunk_size)
+		else:
+			self._mmb_prefetch_enabled = False
+		self._controller.configure_mmb_prefetch(
+			enabled=self._mmb_prefetch_enabled,
+			chunk_size=self._mmb_prefetch_chunk_size,
+		)
+		self._controller.open_imb_file(path)
+		new_state = self._controller.state()
+		if new_state.file_path:
+			self._load_project_state_for_dataset(new_state.file_path)
+			# Re-anchor prefetch after dataset state restore so initial pre-render
+			# tracks the restored ping instead of always starting near ping 0.
+			self._controller.refresh_prefetch_window()
+
+	def _ensure_matlab_decoder_for_mmb(self) -> bool:
+		state = self._controller.state()
+		if state.decoder_backend == "matlab" and state.connected:
+			return True
+		self._set_status("MMB detected: connecting MATLAB decoder...")
+		self._controller.connect_matlab()
+		updated = self._controller.state()
+		if updated.decoder_backend == "matlab" and updated.connected:
+			return True
+		QMessageBox.warning(
+			self,
+			"MATLAB Required for MMB",
+			(
+				"Could not connect MATLAB automatically.\n\n"
+				"MMB/.00x loading requires MATLAB decoder.\n"
+				"Please connect MATLAB and try again."
+			),
+		)
+		return False
+
+	@staticmethod
+	def _is_mmb_like_path(path: str) -> bool:
+		suffix = Path(path).suffix.lower()
+		return suffix == ".mmb" or re.fullmatch(r"\.\d{3}", suffix) is not None
+
+	def _dataset_resume_ping_hint(self, source_path: str) -> int:
+		payload = self._read_project_state_payload(source_path)
+		if not isinstance(payload, dict):
+			return 0
+		try:
+			return max(0, int(payload.get("last_ping_index", 0)))
+		except (TypeError, ValueError):
+			return 0
+
+	@staticmethod
+	def _format_probe_count(count: int, limit: int) -> str:
+		return f"{int(limit)}+" if int(count) >= int(limit) else str(int(count))
+
+	def _mmb_cache_prompt_hint(self, source_path: str) -> str:
+		resume_ping = self._dataset_resume_ping_hint(source_path)
+		probe_limit = 2000
+		backend = self._controller.state().decoder_backend
+		cached_ahead = self._controller.estimate_cached_contiguous(
+			file_path=source_path,
+			start_ping_index=resume_ping + 1,
+			decoder_backend=backend,
+			max_probe=probe_limit,
+		)
+		cached_from_zero = self._controller.estimate_cached_contiguous(
+			file_path=source_path,
+			start_ping_index=0,
+			decoder_backend=backend,
+			max_probe=probe_limit,
+		)
+		return (
+			f"Resume ping (dataset state): {resume_ping}\n"
+			f"Cached contiguous ahead: {self._format_probe_count(cached_ahead, probe_limit)} frame(s)\n"
+			f"Cached contiguous from ping 0: {self._format_probe_count(cached_from_zero, probe_limit)} frame(s)\n\n"
+		)
+
+	def _prompt_mmb_prefetch_options(self, source_path: str) -> tuple[bool, int] | None:
+		cache_hint = self._mmb_cache_prompt_hint(source_path)
+		reply = QMessageBox.question(
+			self,
+			"MMB Prefetch",
+			(
+				f"{cache_hint}"
+				"Enable MMB pre-render before playback?\n"
+				"(Enter 0 later to skip pre-render and use realtime decode.)"
+			),
+			QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
+			QMessageBox.StandardButton.Yes,
+		)
+		if reply == QMessageBox.StandardButton.Cancel:
+			return None
+		if reply == QMessageBox.StandardButton.No:
+			return False, 0
+
+		max_chunk = 5000
+		chunk_size, ok = QInputDialog.getInt(
+			self,
+			"MMB Pre-render Frames",
+			(
+				f"{cache_hint}"
+				"How many initial frames should be pre-rendered?\n"
+				"Use 0 to keep classic realtime playback."
+			),
+			int(np.clip(int(self._mmb_prefetch_chunk_size), 0, max_chunk)),
+			0,
+			max_chunk,
+			1,
+		)
+		if not ok:
+			return None
+		if int(chunk_size) <= 0:
+			return False, 0
+		return True, int(chunk_size)
+
+	def _ensure_prefetch_progress_dialog(self) -> QProgressDialog:
+		if self._prefetch_progress_dialog is None:
+			dialog = QProgressDialog("Prefetching MMB frames...", "", 0, 100, self)
+			dialog.setWindowTitle("MMB Prefetch")
+			dialog.setCancelButton(None)
+			dialog.setAutoClose(False)
+			dialog.setAutoReset(False)
+			dialog.setMinimumDuration(0)
+			self._prefetch_progress_dialog = dialog
+		return self._prefetch_progress_dialog
+
+	def _close_prefetch_progress_dialog(self) -> None:
+		if self._prefetch_progress_dialog is not None:
+			self._prefetch_progress_dialog.hide()
+
+	def _on_prefetch_event(self, event_obj: object) -> None:
+		if not isinstance(event_obj, dict):
+			return
+		event_type = str(event_obj.get("type", "")).strip().lower()
+		if event_type == "prefetch_started":
+			frame_count = max(1, int(event_obj.get("frame_count", 1)))
+			start_idx = int(event_obj.get("start_ping_index", 0))
+			reason = str(event_obj.get("reason", "")).strip().lower()
+			self._prefetch_status_progress.setVisible(True)
+			self._prefetch_status_progress.setRange(0, frame_count)
+			self._prefetch_status_progress.setValue(0)
+			self._prefetch_status_progress.setFormat(
+				f"PF {start_idx}-{start_idx + frame_count - 1} %v/%m"
+			)
+			if bool(event_obj.get("urgent", False)) and reason == "wait_target":
+				dialog = self._ensure_prefetch_progress_dialog()
+				dialog.setLabelText(
+					f"Loading frames {start_idx} to {start_idx + frame_count - 1}..."
+				)
+				dialog.setRange(0, frame_count)
+				dialog.setValue(0)
+				dialog.show()
+			return
+		if event_type == "prefetch_progress":
+			dialog = self._prefetch_progress_dialog
+			frame_count = max(1, int(event_obj.get("frame_count", 1)))
+			loaded_count = int(event_obj.get("loaded_count", 0))
+			start_idx = int(event_obj.get("start_ping_index", 0))
+			latest_idx = int(event_obj.get("latest_ping_index", start_idx))
+			loaded_clamped = int(np.clip(loaded_count, 0, frame_count))
+			if self._prefetch_status_progress.isVisible():
+				self._prefetch_status_progress.setRange(0, frame_count)
+				self._prefetch_status_progress.setValue(loaded_clamped)
+				self._prefetch_status_progress.setFormat(
+					f"PF {start_idx}-{start_idx + frame_count - 1} {loaded_clamped}/{frame_count}"
+				)
+			if dialog is not None and dialog.isVisible():
+				dialog.setRange(0, frame_count)
+				dialog.setValue(loaded_clamped)
+				dialog.setLabelText(
+					f"Loading frame {latest_idx} ({loaded_clamped}/{frame_count})..."
+				)
+			return
+		if event_type == "prefetch_waiting":
+			self._prefetch_status_progress.setVisible(True)
+			self._prefetch_status_progress.setRange(0, 0)
+			self._prefetch_status_progress.setValue(0)
+			self._prefetch_status_progress.setFormat("Prefetch waiting...")
+			dialog = self._ensure_prefetch_progress_dialog()
+			target = int(event_obj.get("target_ping_index", -1))
+			dialog.setRange(0, 0)
+			dialog.setValue(0)
+			dialog.setLabelText(f"Waiting for frame {target} to be prefetched...")
+			dialog.show()
+			return
+		if event_type in {"prefetch_wait_ready", "prefetch_wait_failed"}:
+			self._close_prefetch_progress_dialog()
+			return
+		if event_type == "prefetch_finished":
+			self._prefetch_status_progress.setVisible(False)
+			if self._prefetch_progress_dialog is not None and self._prefetch_progress_dialog.isVisible():
+				error_message = str(event_obj.get("error_message", "")).strip()
+				if error_message:
+					self._prefetch_progress_dialog.setLabelText(f"Prefetch error: {error_message}")
+				else:
+					self._close_prefetch_progress_dialog()
+			return
+		if event_type in {"prefetch_disabled", "prefetch_ready"}:
+			self._prefetch_status_progress.setVisible(False)
+			self._close_prefetch_progress_dialog()
+
+	def _default_project_state_payload(self, source_file: str) -> dict:
+		state = self._controller.state()
+		return {
+			"source_file": source_file,
+			"last_ping_index": int(state.current_ping_index),
+			"display": {
+				"auto_intensity_enabled": True,
+				"low_db": -90,
+				"high_db": -30,
+				"palette_name": DEFAULT_PROJECT_PALETTE,
+				"tvg_enabled": DEFAULT_PROJECT_TVG_ENABLED,
+				"tvg_log_slope_db_per_decade": DEFAULT_PROJECT_TVG_LOG_SLOPE,
+				"tvg_linear_slope_db_per_m": DEFAULT_PROJECT_TVG_LINEAR_SLOPE,
+				"tvg_offset_db": DEFAULT_PROJECT_TVG_OFFSET,
+				"zoom_enabled": False,
+				"zoom_scale": 1.0,
+			},
+			"view": {
+				"grid_enabled": DEFAULT_PROJECT_GRID,
+				"fan_focus_enabled": DEFAULT_PROJECT_FAN_FOCUS,
+			},
+			"playback_rate": 1.0,
+		}
+
+	def _collect_project_state_payload(self, source_file: str) -> dict:
+		state = self._controller.state()
+		return {
+			"saved_at_utc": datetime.now(timezone.utc).isoformat(),
+			"source_file": source_file,
+			"last_ping_index": int(state.current_ping_index),
+			"display": {
+				"auto_intensity_enabled": bool(self._auto_intensity_btn.isChecked()),
+				"low_db": int(self._low_db_slider.value()),
+				"high_db": int(self._high_db_slider.value()),
+				"palette_name": self._selected_palette_name(),
+				"tvg_enabled": bool(self._tvg_enabled_btn.isChecked()),
+				"tvg_log_slope_db_per_decade": int(self._tvg_log_slope_slider.value()),
+				"tvg_linear_slope_db_per_m": float(self._tvg_linear_slope_slider.value()) / 10.0,
+				"tvg_offset_db": int(self._tvg_offset_slider.value()),
+				"zoom_enabled": bool(self._zoom_enabled_btn.isChecked()),
+				"zoom_scale": float(self._zoom_scale_slider.value()) / 10.0,
+			},
+			"view": {
+				"grid_enabled": bool(self._grid_toggle_btn.isChecked()),
+				"fan_focus_enabled": bool(self._fan_focus_btn.isChecked()),
+			},
+			"playback_rate": float(state.playback_rate),
+		}
+
+	def _read_project_state_payload(self, source_file: str) -> dict | None:
+		path = self._project_state_path(source_file)
+		if not path.exists():
+			return None
+		try:
+			data = json.loads(path.read_text(encoding="utf-8"))
+		except (OSError, json.JSONDecodeError):
+			return None
+		return data if isinstance(data, dict) else None
+
+	def _write_project_state_payload(self, source_file: str, payload: dict) -> None:
+		path = self._project_state_path(source_file)
+		path.parent.mkdir(parents=True, exist_ok=True)
+		path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+	def _mark_project_state_dirty(self) -> None:
+		if self._project_state_loading:
+			return
+		state = self._controller.state()
+		source_file = state.file_path or self._project_state_source_file
+		if not source_file:
+			return
+		self._project_state_source_file = source_file
+		self._project_state_dirty = True
+		self._project_state_save_timer.start()
+
+	def _flush_project_state_save(self, *, force: bool = False) -> None:
+		if not self._project_state_source_file:
+			return
+		if not (self._project_state_dirty or force):
+			return
+		payload = self._collect_project_state_payload(self._project_state_source_file)
+		try:
+			self._write_project_state_payload(self._project_state_source_file, payload)
+			self._project_state_dirty = False
+		except OSError:
+			pass
+
+	def _apply_project_state_payload(self, source_file: str, payload: dict) -> None:
+		display = payload.get("display") if isinstance(payload, dict) else {}
+		view = payload.get("view") if isinstance(payload, dict) else {}
+		last_ping_index = int(payload.get("last_ping_index", 0)) if isinstance(payload, dict) else 0
+		palette_name = str(display.get("palette_name", DEFAULT_PROJECT_PALETTE)).strip().lower() if isinstance(display, dict) else DEFAULT_PROJECT_PALETTE
+		auto_intensity_enabled = bool(display.get("auto_intensity_enabled", True)) if isinstance(display, dict) else True
+		low_db = int(display.get("low_db", -90)) if isinstance(display, dict) else -90
+		high_db = int(display.get("high_db", -30)) if isinstance(display, dict) else -30
+		tvg_enabled = bool(display.get("tvg_enabled", DEFAULT_PROJECT_TVG_ENABLED)) if isinstance(display, dict) else DEFAULT_PROJECT_TVG_ENABLED
+		tvg_log = int(round(float(display.get("tvg_log_slope_db_per_decade", DEFAULT_PROJECT_TVG_LOG_SLOPE)))) if isinstance(display, dict) else int(DEFAULT_PROJECT_TVG_LOG_SLOPE)
+		tvg_lin = float(display.get("tvg_linear_slope_db_per_m", DEFAULT_PROJECT_TVG_LINEAR_SLOPE)) if isinstance(display, dict) else DEFAULT_PROJECT_TVG_LINEAR_SLOPE
+		tvg_offset = int(round(float(display.get("tvg_offset_db", DEFAULT_PROJECT_TVG_OFFSET)))) if isinstance(display, dict) else int(DEFAULT_PROJECT_TVG_OFFSET)
+		zoom_enabled = bool(display.get("zoom_enabled", False)) if isinstance(display, dict) else False
+		zoom_scale = float(display.get("zoom_scale", 1.0)) if isinstance(display, dict) else 1.0
+		grid_enabled = bool(view.get("grid_enabled", DEFAULT_PROJECT_GRID)) if isinstance(view, dict) else DEFAULT_PROJECT_GRID
+		fan_focus_enabled = bool(view.get("fan_focus_enabled", DEFAULT_PROJECT_FAN_FOCUS)) if isinstance(view, dict) else DEFAULT_PROJECT_FAN_FOCUS
+		playback_rate = float(payload.get("playback_rate", 1.0)) if isinstance(payload, dict) else 1.0
+
+		self._project_state_loading = True
+		try:
+			palette_idx = self._palette_combo.findData(palette_name)
+			if palette_idx >= 0:
+				self._palette_combo.setCurrentIndex(palette_idx)
+			self._auto_intensity_btn.setChecked(auto_intensity_enabled)
+			self._low_db_slider.setValue(int(np.clip(low_db, -120, 0)))
+			self._high_db_slider.setValue(int(np.clip(high_db, -120, 0)))
+			self._tvg_enabled_btn.setChecked(tvg_enabled)
+			self._tvg_log_slope_slider.setValue(int(np.clip(tvg_log, -20, 60)))
+			self._tvg_linear_slope_slider.setValue(int(np.clip(int(round(tvg_lin * 10.0)), -50, 50)))
+			self._tvg_offset_slider.setValue(int(np.clip(tvg_offset, -40, 40)))
+			self._zoom_enabled_btn.setChecked(zoom_enabled)
+			self._zoom_scale_slider.setValue(int(np.clip(int(round(zoom_scale * 10.0)), 10, 80)))
+			self._grid_toggle_btn.setChecked(grid_enabled)
+			self._fan_focus_btn.setChecked(fan_focus_enabled)
+			self._controller.set_playback_rate(playback_rate)
+			self._controller.set_ping_index(max(0, int(last_ping_index)))
+		finally:
+			self._project_state_loading = False
+		self._project_state_source_file = source_file
+		self._project_state_last_ping_index = max(0, int(last_ping_index))
+		self._project_state_dirty = False
+
+	def _load_project_state_for_dataset(self, source_file: str) -> None:
+		payload = self._read_project_state_payload(source_file)
+		if payload is None:
+			payload = self._default_project_state_payload(source_file)
+		self._apply_project_state_payload(source_file, payload)
 
 	def _has_unsaved_annotations(self) -> bool:
 		return bool(
@@ -502,6 +892,26 @@ class MainWindow(QMainWindow):
 			return
 		self._controller.toggle_play()
 
+	def _on_prefetch_ahead_requested(self) -> None:
+		state = self._controller.state()
+		if not state.file_path:
+			self._set_status("Load a file before requesting prefetch ahead.")
+			return
+		frame_count, ok = QInputDialog.getInt(
+			self,
+			"Prefetch Ahead",
+			"How many frames ahead should be prefetched?",
+			int(np.clip(self._prefetch_ahead_count, 1, 5000)),
+			1,
+			5000,
+			1,
+		)
+		if not ok:
+			return
+		self._prefetch_ahead_count = int(frame_count)
+		if not self._controller.prefetch_ahead(int(frame_count)):
+			return
+
 	def _on_step_forward_requested(self) -> None:
 		if not self._confirm_unsaved_annotations(action_label="go to the next frame"):
 			return
@@ -528,6 +938,7 @@ class MainWindow(QMainWindow):
 		except ValueError:
 			rate = 1.0
 		self._controller.set_playback_rate(rate)
+		self._mark_project_state_dirty()
 
 	def _on_grid_toggled(self, checked: bool) -> None:
 		enabled = bool(checked)
@@ -535,12 +946,14 @@ class MainWindow(QMainWindow):
 		self._controller.set_show_grid(enabled)
 		self._refresh_pixmaps()
 		self._set_status("Fan grid enabled." if enabled else "Fan grid disabled.")
+		self._mark_project_state_dirty()
 
 	def _on_auto_intensity_toggled(self, checked: bool) -> None:
 		auto_enabled = bool(checked)
 		self._controller.set_auto_intensity(auto_enabled)
 		self._set_display_controls_enabled(auto_enabled)
 		self._persist_display_preferences()
+		self._mark_project_state_dirty()
 
 	def _on_display_low_db_changed(self, value: int) -> None:
 		low_db = int(np.clip(int(value), -120, 0))
@@ -555,6 +968,7 @@ class MainWindow(QMainWindow):
 		self._low_db_label.setText(f"Low dB: {low_db}")
 		self._controller.set_display_window_db(low_db=float(low_db))
 		self._persist_display_preferences()
+		self._mark_project_state_dirty()
 
 	def _on_display_high_db_changed(self, value: int) -> None:
 		high_db = int(np.clip(int(value), -120, 0))
@@ -569,17 +983,20 @@ class MainWindow(QMainWindow):
 		self._high_db_label.setText(f"High dB: {high_db}")
 		self._controller.set_display_window_db(high_db=float(high_db))
 		self._persist_display_preferences()
+		self._mark_project_state_dirty()
 
 	def _on_palette_changed(self, _: int) -> None:
 		palette_name = self._selected_palette_name()
 		self._controller.set_palette(palette_name)
 		self._persist_display_preferences()
+		self._mark_project_state_dirty()
 
 	def _on_tvg_enabled_toggled(self, checked: bool) -> None:
 		tvg_enabled = bool(checked)
 		self._controller.set_tvg_enabled(tvg_enabled)
 		self._set_tvg_controls_enabled(tvg_enabled)
 		self._persist_display_preferences()
+		self._mark_project_state_dirty()
 
 	def _on_tvg_log_slope_changed(self, value: int) -> None:
 		log_slope = int(np.clip(int(value), -20, 60))
@@ -590,6 +1007,7 @@ class MainWindow(QMainWindow):
 		self._tvg_log_slope_label.setText(f"TVG Log: {log_slope} dB/dec")
 		self._controller.set_tvg_parameters(log_slope_db_per_decade=float(log_slope))
 		self._persist_display_preferences()
+		self._mark_project_state_dirty()
 
 	def _on_tvg_linear_slope_changed(self, value: int) -> None:
 		scaled = int(np.clip(int(value), -50, 50))
@@ -601,6 +1019,7 @@ class MainWindow(QMainWindow):
 		self._tvg_linear_slope_label.setText(f"TVG Lin: {linear_slope:.1f} dB/m")
 		self._controller.set_tvg_parameters(linear_slope_db_per_m=linear_slope)
 		self._persist_display_preferences()
+		self._mark_project_state_dirty()
 
 	def _on_tvg_offset_changed(self, value: int) -> None:
 		offset_db = int(np.clip(int(value), -40, 40))
@@ -611,6 +1030,7 @@ class MainWindow(QMainWindow):
 		self._tvg_offset_label.setText(f"TVG Offset: {offset_db} dB")
 		self._controller.set_tvg_parameters(offset_db=float(offset_db))
 		self._persist_display_preferences()
+		self._mark_project_state_dirty()
 
 	def _on_zoom_enabled_toggled(self, checked: bool) -> None:
 		zoom_enabled = bool(checked)
@@ -620,6 +1040,7 @@ class MainWindow(QMainWindow):
 			self._clear_zoom_box_selection(refresh=True)
 		self._controller.set_zoom_enabled(zoom_enabled)
 		self._persist_display_preferences()
+		self._mark_project_state_dirty()
 
 	def _on_zoom_scale_changed(self, value: int) -> None:
 		scale_tenths = int(np.clip(int(value), 10, 80))
@@ -631,10 +1052,17 @@ class MainWindow(QMainWindow):
 		self._zoom_scale_label.setText(f"Zoom: {zoom_scale:.1f}x")
 		self._controller.set_zoom_scale(zoom_scale)
 		self._persist_display_preferences()
+		self._mark_project_state_dirty()
 
 	def _on_zoom_reset_clicked(self) -> None:
 		self._controller.reset_zoom()
 		self._persist_display_preferences()
+		self._mark_project_state_dirty()
+
+	def _on_zoom_reset_shortcut(self) -> None:
+		if not self._controller.state().zoom_enabled:
+			return
+		self._on_zoom_reset_clicked()
 
 	def _toggle_grid_mode(self) -> None:
 		self._grid_toggle_btn.toggle()
@@ -646,6 +1074,7 @@ class MainWindow(QMainWindow):
 		self._set_status("Fan focus enabled." if focus_enabled else "Fan focus disabled.")
 		QTimer.singleShot(0, self._sync_cartesian_render_target_idle)
 		self._refresh_pixmaps()
+		self._mark_project_state_dirty()
 
 	def _toggle_fan_focus(self) -> None:
 		self._fan_focus_btn.toggle()
@@ -718,6 +1147,7 @@ class MainWindow(QMainWindow):
 		else:
 			self._file_label.setText("(none)")
 			self._file_label.setToolTip("")
+			self._ping_time_label.setText("Ping Time: -")
 		self._ping_spin.blockSignals(True)
 		self._ping_spin.setValue(state.current_ping_index)
 		self._ping_spin.blockSignals(False)
@@ -797,6 +1227,20 @@ class MainWindow(QMainWindow):
 		self._set_tvg_controls_enabled(state.tvg_enabled)
 		self._set_zoom_controls_enabled(state.zoom_enabled)
 		self._play_btn.setText("Pause [Space]" if state.is_playing else "Play [Space]")
+		speed_labels = {0.25: "0.25x", 0.5: "0.5x", 1.0: "1.0x", 2.0: "2.0x"}
+		closest_speed = min(speed_labels.keys(), key=lambda rate: abs(rate - float(state.playback_rate)))
+		speed_label = speed_labels[closest_speed]
+		if self._speed_combo.currentText() != speed_label:
+			self._speed_combo.blockSignals(True)
+			self._speed_combo.setCurrentText(speed_label)
+			self._speed_combo.blockSignals(False)
+		if state.file_path:
+			self._project_state_source_file = state.file_path
+			current_ping = int(state.current_ping_index)
+			if current_ping != self._project_state_last_ping_index:
+				self._project_state_last_ping_index = current_ping
+				if not state.is_playing:
+					self._mark_project_state_dirty()
 
 	def _set_status(self, text: str) -> None:
 		self._status_label.setText(f"Status: {text}")
@@ -848,11 +1292,16 @@ class MainWindow(QMainWindow):
 			f"Beam: {frame.beam_min_deg:.2f} to {frame.beam_max_deg:.2f} deg | "
 			f"Range: {frame.range_min_m:.2f} to {frame.range_max_m:.2f} m"
 		)
+		self._ping_time_label.setText(f"Ping Time: {frame.ping_timestamp_utc}")
 
 	def resizeEvent(self, event) -> None:  # type: ignore[override]
 		super().resizeEvent(event)
 		self._resize_sync_timer.start()
 		self._refresh_pixmaps()
+
+	def closeEvent(self, event) -> None:  # type: ignore[override]
+		self._flush_project_state_save(force=True)
+		super().closeEvent(event)
 
 	def _sync_cartesian_render_target_initial(self) -> None:
 		self._sync_cartesian_render_target(refresh_if_paused=False)
@@ -1338,11 +1787,22 @@ class MainWindow(QMainWindow):
 			frame.ping_index,
 			self._annotator_slug,
 		)
+		legacy_save_dir, legacy_all_measurements_path, legacy_ping_measurements_path = self._legacy_measurement_paths(
+			state.file_path,
+			frame.ping_index,
+			self._annotator_slug,
+		)
 		save_dir.mkdir(parents=True, exist_ok=True)
 
 		try:
-			all_measurements = self._read_measurements_array(all_measurements_path)
-			ping_measurements = self._read_measurements_array(ping_measurements_path)
+			all_measurements = self._read_measurements_array_with_legacy(
+				primary_path=all_measurements_path,
+				legacy_path=legacy_all_measurements_path,
+			)
+			ping_measurements = self._read_measurements_array_with_legacy(
+				primary_path=ping_measurements_path,
+				legacy_path=legacy_ping_measurements_path,
+			)
 			staged_types = list(dict.fromkeys(staged.annotation_type for staged in self._staged_measurements))
 			type_all_measurements: dict[str, list[dict]] = {}
 			type_ping_measurements: dict[str, list[dict]] = {}
@@ -1355,8 +1815,20 @@ class MainWindow(QMainWindow):
 					annotation_type=annotation_type,
 				)
 				type_paths[annotation_type] = (type_all_path, type_ping_path)
-				type_all_measurements[annotation_type] = self._read_measurements_array(type_all_path)
-				type_ping_measurements[annotation_type] = self._read_measurements_array(type_ping_path)
+				legacy_type_all_path, legacy_type_ping_path = self._measurement_type_paths(
+					measurements_dir=legacy_save_dir,
+					ping_index=frame.ping_index,
+					annotator_slug=self._annotator_slug,
+					annotation_type=annotation_type,
+				)
+				type_all_measurements[annotation_type] = self._read_measurements_array_with_legacy(
+					primary_path=type_all_path,
+					legacy_path=legacy_type_all_path,
+				)
+				type_ping_measurements[annotation_type] = self._read_measurements_array_with_legacy(
+					primary_path=type_ping_path,
+					legacy_path=legacy_type_ping_path,
+				)
 		except ValueError as exc:
 			self._set_status(f"Cannot save measurement: {exc}")
 			return
@@ -1628,6 +2100,14 @@ class MainWindow(QMainWindow):
 		}
 
 	def _measurement_paths(self, source_file: str, ping_index: int, annotator_slug: str) -> tuple[Path, Path, Path]:
+		measurements_dir = self._project_root_dir(source_file) / "measurements" / annotator_slug
+		all_measurements_path = measurements_dir / f"all_measurements_{annotator_slug}.json"
+		ping_measurements_path = (
+			measurements_dir / f"ping_{int(ping_index):06d}_measurements_{annotator_slug}.json"
+		)
+		return measurements_dir, all_measurements_path, ping_measurements_path
+
+	def _legacy_measurement_paths(self, source_file: str, ping_index: int, annotator_slug: str) -> tuple[Path, Path, Path]:
 		output_root = Path(__file__).resolve().parents[1] / "outputs"
 		dataset_name = self._dataset_folder_name(source_file)
 		measurements_dir = output_root / dataset_name / "measurements" / annotator_slug
@@ -1636,6 +2116,14 @@ class MainWindow(QMainWindow):
 			measurements_dir / f"ping_{int(ping_index):06d}_measurements_{annotator_slug}.json"
 		)
 		return measurements_dir, all_measurements_path, ping_measurements_path
+
+	def _project_root_dir(self, source_file: str) -> Path:
+		output_root = Path(__file__).resolve().parents[1] / "outputs"
+		dataset_name = self._dataset_folder_name(source_file)
+		return output_root / f"{dataset_name}_project"
+
+	def _project_state_path(self, source_file: str) -> Path:
+		return self._project_root_dir(source_file) / "project_state.json"
 
 	def _measurement_type_paths(
 		self,
@@ -1687,6 +2175,16 @@ class MainWindow(QMainWindow):
 
 	def _write_measurements_array(self, path: Path, measurements: list[dict]) -> None:
 		path.write_text(json.dumps(measurements, indent=2), encoding="utf-8")
+
+	def _read_measurements_array_with_legacy(self, *, primary_path: Path, legacy_path: Path) -> list[dict]:
+		primary = self._read_measurements_array(primary_path)
+		if primary or not legacy_path.exists():
+			return primary
+		try:
+			legacy = self._read_measurements_array(legacy_path)
+		except ValueError:
+			return primary
+		return legacy if legacy else primary
 
 	def _view_pos_to_source_pixel(
 		self,

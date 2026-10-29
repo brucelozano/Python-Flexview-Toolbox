@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -69,6 +70,8 @@ class NativeFlexviewReader:
 		velocity_sound = float(struct.unpack("<f", body_prefix[48:52])[0])
 		if velocity_sound <= 0.0:
 			velocity_sound = 1500.0
+		time_seconds = int(struct.unpack("<I", body_prefix[40:44])[0])
+		time_milliseconds = int(struct.unpack("<I", body_prefix[44:48])[0])
 		num_samples = int(struct.unpack("<I", body_prefix[52:56])[0])
 		swst = float(struct.unpack("<f", body_prefix[64:68])[0])
 		swl = float(struct.unpack("<f", body_prefix[68:72])[0])
@@ -131,6 +134,8 @@ class NativeFlexviewReader:
 			"Image_Sample_Interval": float(image_sample_interval),
 			"Velocity_Sound": float(velocity_sound),
 			"Data_Type": int(data_type),
+			"Time_Seconds": float(time_seconds),
+			"Time_Milliseconds": float(time_milliseconds),
 		}
 		return NativeFlexviewFrame(
 			header=header,
@@ -141,16 +146,37 @@ class NativeFlexviewReader:
 		)
 
 	def _discover_file_sequence(self, root_path: str) -> list[str]:
-		base_name, _ = os.path.splitext(root_path)
-		sequence = [root_path]
+		root = Path(root_path).resolve()
+		base_name, ext = os.path.splitext(str(root))
+		ext_lower = ext.lower()
+		is_mmb_like = ext_lower == ".mmb" or re.fullmatch(r"\.\d{3}", ext_lower) is not None
+		if not is_mmb_like:
+			return [str(root)]
+
+		sequence: list[str] = []
+		seen: set[str] = set()
+
+		def _append_if_exists(path_str: str) -> None:
+			candidate = str(Path(path_str).resolve())
+			if candidate in seen:
+				return
+			if os.path.exists(candidate):
+				sequence.append(candidate)
+				seen.add(candidate)
+
+		# Canonical split ordering: .mmb first, then .001, .002, ...
+		_append_if_exists(f"{base_name}.mmb")
 		seq_idx = 1
 		while True:
 			next_path = f"{base_name}.{seq_idx:03d}"
 			if not os.path.exists(next_path):
 				break
-			sequence.append(next_path)
+			_append_if_exists(next_path)
 			seq_idx += 1
-		return sequence
+
+		# Fallback for unusual cases: ensure explicitly selected path is present.
+		_append_if_exists(str(root))
+		return sequence if sequence else [str(root)]
 
 	def _build_frame_index(self) -> None:
 		if not self._file_sequence:
