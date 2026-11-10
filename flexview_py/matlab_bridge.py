@@ -1,11 +1,115 @@
-from typing import Any, Dict, Tuple, Optional
 import json
 import os
+import sys
+from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
 
-try:
-	import matlab.engine  # type: ignore
-except Exception:  # pragma: no cover
-	matlab = None  # type: ignore
+_MATLAB_MODULE: Optional[Any] = None
+_MATLAB_IMPORT_ERROR: Optional[Exception] = None
+
+
+def _try_import_matlab_engine() -> tuple[Optional[Any], Optional[Exception]]:
+	"""Try importing matlab + matlab.engine and return (module, error)."""
+	try:
+		import importlib
+
+		matlab_mod = importlib.import_module("matlab")
+		importlib.import_module("matlab.engine")
+		return matlab_mod, None
+	except Exception as exc:  # pragma: no cover - environment specific
+		return None, exc
+
+
+def _prepend_sys_path(path: Path) -> None:
+	path_str = str(path)
+	if path_str and path_str not in sys.path:
+		sys.path.insert(0, path_str)
+
+
+def _candidate_matlab_roots() -> list[Path]:
+	roots: list[Path] = []
+	env_root = os.environ.get("MATLABROOT")
+	if env_root:
+		roots.append(Path(env_root))
+
+	if sys.platform.startswith("win"):
+		base = Path("C:/Program Files/MATLAB")
+		if base.is_dir():
+			# Prefer newest release first (e.g. R2025b > R2025a).
+			roots.extend(sorted(base.glob("R*"), reverse=True))
+
+	seen: set[str] = set()
+	unique: list[Path] = []
+	for root in roots:
+		try:
+			resolved = str(root.resolve())
+		except Exception:
+			continue
+		if resolved in seen:
+			continue
+		seen.add(resolved)
+		unique.append(root)
+	return unique
+
+
+def _configure_runtime_paths_for_root(root: Path) -> bool:
+	"""Add MATLAB engine runtime paths for a given MATLAB installation root."""
+	dist_root = root / "extern" / "engines" / "python" / "dist"
+	matlab_pkg_root = dist_root / "matlab"
+	engine_win64 = matlab_pkg_root / "engine" / "win64"
+	extern_bin = root / "extern" / "bin" / "win64"
+	bin_win64 = root / "bin" / "win64"
+
+	required = (dist_root, matlab_pkg_root, engine_win64, extern_bin, bin_win64)
+	if not all(p.is_dir() for p in required):
+		return False
+
+	_prepend_sys_path(dist_root)
+	_prepend_sys_path(matlab_pkg_root)
+	_prepend_sys_path(engine_win64)
+	_prepend_sys_path(extern_bin)
+
+	if sys.platform.startswith("win"):
+		path_entries = [str(bin_win64), str(extern_bin)]
+		existing_path = os.environ.get("PATH", "")
+		for entry in reversed(path_entries):
+			if entry and entry not in existing_path:
+				existing_path = f"{entry}{os.pathsep}{existing_path}" if existing_path else entry
+		os.environ["PATH"] = existing_path
+		if hasattr(os, "add_dll_directory"):
+			for dll_dir in (bin_win64, extern_bin):
+				try:
+					os.add_dll_directory(str(dll_dir))
+				except Exception:
+					pass
+	return True
+
+
+def _ensure_matlab_engine_available() -> Optional[Any]:
+	"""Import MATLAB engine, with runtime-path fallback for frozen EXE builds."""
+	global _MATLAB_MODULE, _MATLAB_IMPORT_ERROR
+	if _MATLAB_MODULE is not None:
+		return _MATLAB_MODULE
+
+	matlab_mod, import_err = _try_import_matlab_engine()
+	if matlab_mod is not None:
+		_MATLAB_MODULE = matlab_mod
+		_MATLAB_IMPORT_ERROR = None
+		return _MATLAB_MODULE
+
+	last_error: Optional[Exception] = import_err
+	for root in _candidate_matlab_roots():
+		if not _configure_runtime_paths_for_root(root):
+			continue
+		matlab_mod, import_err = _try_import_matlab_engine()
+		if matlab_mod is not None:
+			_MATLAB_MODULE = matlab_mod
+			_MATLAB_IMPORT_ERROR = None
+			return _MATLAB_MODULE
+		last_error = import_err
+
+	_MATLAB_IMPORT_ERROR = last_error
+	return None
 
 
 class MatlabSession:
@@ -16,22 +120,42 @@ class MatlabSession:
 
 	def start(self) -> None:
 		if self._eng is None:
-			if matlab is None:
+			matlab_mod = _ensure_matlab_engine_available()
+			if matlab_mod is None:
+				detail = f" (import error: {_MATLAB_IMPORT_ERROR})" if _MATLAB_IMPORT_ERROR else ""
 				raise RuntimeError(
 					"MATLAB Engine is not available. Install from MATLAB: "
 					"cd(fullfile(matlabroot,'extern','engines','python')); system('py -3 -m pip install .')"
+					f"{detail}"
 				)
-			self._eng = matlab.engine.start_matlab()
-			# Change the CWD and add path to be robust against .mex file issues.
-			project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
-			toolbox_root = os.path.join(project_root, "M3_MATLAB_Toolbox_1.2")
-			helpers_root = os.path.join(project_root, "matlab_helpers")
-			if os.path.isdir(toolbox_root):
-				self.eng.cd(toolbox_root, nargout=0)
-				gp = self.eng.genpath(toolbox_root)
+			self._eng = matlab_mod.engine.start_matlab()
+			# Change the CWD and add helper paths (supports source + frozen builds).
+			toolbox_root, helpers_root = self._resolve_matlab_resource_paths()
+			if toolbox_root is not None:
+				self.eng.cd(str(toolbox_root), nargout=0)
+				gp = self.eng.genpath(str(toolbox_root))
 				self.eng.addpath(gp, nargout=0)
-			if os.path.isdir(helpers_root):
-				self.eng.addpath(helpers_root, nargout=0)
+			if helpers_root is not None:
+				self.eng.addpath(str(helpers_root), nargout=0)
+
+	@staticmethod
+	def _resolve_matlab_resource_paths() -> tuple[Path | None, Path | None]:
+		def _candidates() -> list[Path]:
+			source_root = Path(__file__).resolve().parents[1]
+			cands = [source_root]
+			if getattr(sys, "frozen", False):
+				meipass = getattr(sys, "_MEIPASS", None)
+				if meipass:
+					cands.insert(0, Path(meipass))
+				cands.insert(0, Path(sys.executable).resolve().parent)
+			return cands
+
+		for root in _candidates():
+			toolbox_root = root / "M3_MATLAB_Toolbox_1.2"
+			helpers_root = root / "matlab_helpers"
+			if toolbox_root.is_dir() and helpers_root.is_dir():
+				return toolbox_root, helpers_root
+		return None, None
 
 	def stop(self) -> None:
 		if self._eng is not None:

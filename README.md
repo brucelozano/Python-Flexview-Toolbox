@@ -41,6 +41,32 @@ py -3 -m pip install -r requirements.txt
 py -3 -m flexview_player
 ```
 
+## Build Windows EXE
+
+Create a Windows GUI build with PyInstaller:
+
+```powershell
+.\scripts\build_windows_exe.ps1 -Clean
+```
+
+Output is written to `dist\FlexviewPlayer\`.
+
+Notes:
+
+- The build includes `matlab_helpers` and `M3_MATLAB_Toolbox_1.2`.
+- `.mmb` / `.00x` workflows require MATLAB Engine availability at runtime (the app auto-switches to MATLAB decoder for those files).
+- `.imb` can run on the native Python decoder without MATLAB.
+
+### Package a Shareable ZIP
+
+After building, create a portable release archive:
+
+```powershell
+.\scripts\package_windows_release.ps1
+```
+
+Output is written to `releases\` as a versioned zip containing the full `FlexviewPlayer` app folder.
+
 ## Player Workflow
 
 1. Click `Open` and choose an `.imb`/`.mmb` file (split MMB segments like `.001` are also supported).

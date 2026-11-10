@@ -16,8 +16,14 @@ def run() -> int:
 		print(f"Import details: {exc}", file=sys.stderr)
 		return 1
 
-	from .playback_controller import PlaybackController
-	from .ui_main_window import MainWindow
+	try:
+		from .playback_controller import PlaybackController
+		from .ui_main_window import MainWindow
+	except ImportError:
+		# Support script/frozen launch contexts where relative imports
+		# may not resolve with a package parent.
+		from flexview_player.playback_controller import PlaybackController
+		from flexview_player.ui_main_window import MainWindow
 
 	app = QApplication(sys.argv)
 	controller = PlaybackController()

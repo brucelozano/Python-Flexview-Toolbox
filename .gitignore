@@ -6,3 +6,32 @@ outputs2/
 __pycache__/
 *.pyc
 OASFA/
+build/
+dist/
+*.spec
+releases/
+
+# Python tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.nox/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+.ipynb_checkpoints/
+
+# Packaging/build metadata
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Local logs/temp files
+*.log
+*.tmp
+*.bak
+
+# Windows metadata
+Thumbs.db
+Desktop.ini
