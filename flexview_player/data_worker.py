@@ -45,6 +45,10 @@ class RenderedFrame:
 	cart_z_min_m: float
 	cart_z_max_m: float
 	ping_timestamp_utc: str
+	# Raw magnitude dB (ranges x beams, no TVG/windowing) + axes, for annotation statistics.
+	polar_db: np.ndarray
+	ranges_m: np.ndarray
+	beam_angles_deg: np.ndarray
 
 
 class MatlabDataWorker:
@@ -284,8 +288,9 @@ class MatlabDataWorker:
 			cart_target_width,
 			int(round(cart_target_height * cart_aspect)),
 		)
+		polar_db = magnitude_db(image)
 		cart_bgr = render_cartesian_image(
-			magnitude_db(image),
+			polar_db,
 			x_coords,
 			z_coords,
 			output_width_px=cart_render_width_px,
@@ -323,6 +328,9 @@ class MatlabDataWorker:
 			cart_z_min_m=cart_z_min,
 			cart_z_max_m=cart_z_max,
 			ping_timestamp_utc=ping_timestamp_utc,
+			polar_db=polar_db,
+			ranges_m=np.asarray(ranges, dtype=np.float32),
+			beam_angles_deg=np.asarray(beam_angles, dtype=np.float32),
 		)
 
 	@staticmethod

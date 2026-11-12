@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -12,7 +13,10 @@ from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QPixmap,
 from PySide6.QtWidgets import (
 	QApplication,
 	QComboBox,
+	QDialog,
+	QDialogButtonBox,
 	QFileDialog,
+	QFormLayout,
 	QGridLayout,
 	QHBoxLayout,
 	QInputDialog,
@@ -30,6 +34,8 @@ from PySide6.QtWidgets import (
 	QVBoxLayout,
 	QWidget,
 )
+
+from flexview_py.geometry import polygon_db_stats
 
 from .data_worker import RenderedFrame
 from .playback_controller import PlaybackController, PlayerState
@@ -51,6 +57,44 @@ class StagedAnnotation:
 	points_px: list[tuple[float, float]]
 	points_world: list[WorldPoint]
 	metrics: dict[str, float | int]
+	class_name: str = ""
+
+
+# Stored in saved records as the lowercase name; edit this list to change the choices.
+ANNOTATION_CLASSES = ("habitat", "shark", "fish", "school", "diver", "unknown")
+# RGB used for saved annotations; staged (not yet classified) ones stay teal.
+ANNOTATION_CLASS_COLORS = {
+	"habitat": (46, 204, 113),
+	"shark": (231, 76, 60),
+	"fish": (52, 152, 219),
+	"school": (155, 89, 182),
+	"diver": (241, 196, 15),
+	"unknown": (189, 195, 199),
+}
+
+
+class ClassifyDialog(QDialog):
+	"""One class dropdown per numbered staged annotation; prefilled so Enter accepts."""
+
+	def __init__(self, parent: QWidget, rows: list[tuple[int, str, str]], defaults: list[str]) -> None:
+		super().__init__(parent)
+		self.setWindowTitle("Classify annotations")
+		form = QFormLayout(self)
+		self._combos: list[QComboBox] = []
+		for (number, kind, metric), default in zip(rows, defaults):
+			combo = QComboBox()
+			for name in ANNOTATION_CLASSES:
+				combo.addItem(name.capitalize(), name)
+			combo.setCurrentIndex(combo.findData(default if default in ANNOTATION_CLASSES else "unknown"))
+			form.addRow(f"#{number}  {kind} ({metric})", combo)
+			self._combos.append(combo)
+		buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+		buttons.accepted.connect(self.accept)
+		buttons.rejected.connect(self.reject)
+		form.addRow(buttons)
+
+	def classes(self) -> list[str]:
+		return [str(combo.currentData()) for combo in self._combos]
 
 
 class ImageViewLabel(QLabel):
@@ -193,6 +237,13 @@ class MainWindow(QMainWindow):
 		self._fan_focus_btn = QPushButton("Fan Focus: Off [F]")
 		self._fan_focus_btn.setCheckable(True)
 		self._fan_focus_btn.setChecked(False)
+		self._no_targets_btn = QPushButton("No Targets [N]")
+		self._show_saved_btn = QPushButton("Saved Annotations: On [H]")
+		self._show_saved_btn.setCheckable(True)
+		self._show_saved_btn.setChecked(True)
+		self._flip_btn = QPushButton("Flip: Off [V]")
+		self._flip_btn.setCheckable(True)
+		self._flip_btn.setChecked(False)
 		self._annotator_btn = QPushButton("Annotator: (set)")
 		self._measure_mode_btn = QPushButton("Measure: Off [A]")
 		self._measure_mode_btn.setCheckable(True)
@@ -220,6 +271,7 @@ class MainWindow(QMainWindow):
 		self._zoom_box_current_px: tuple[float, float] | None = None
 		self._annotator_name = ""
 		self._annotator_slug = ""
+		self._ping_file_cache: tuple[tuple, bool, list[dict]] | None = None
 		self._settings = QSettings("Flexview", "FlexviewPlayer")
 		self._mmb_prefetch_enabled = True
 		self._mmb_prefetch_chunk_size = 500
@@ -244,6 +296,15 @@ class MainWindow(QMainWindow):
 		self._shortcut_toggle_measure = QShortcut(QKeySequence("A"), self)
 		self._shortcut_toggle_grid = QShortcut(QKeySequence("G"), self)
 		self._shortcut_toggle_fan_focus = QShortcut(QKeySequence("F"), self)
+		self._shortcut_toggle_flip = QShortcut(QKeySequence("V"), self)
+		self._shortcut_toggle_flip.setContext(Qt.ShortcutContext.WindowShortcut)
+		self._shortcut_toggle_flip.setAutoRepeat(False)
+		self._shortcut_no_targets = QShortcut(QKeySequence("N"), self)
+		self._shortcut_no_targets.setContext(Qt.ShortcutContext.WindowShortcut)
+		self._shortcut_no_targets.setAutoRepeat(False)
+		self._shortcut_show_saved = QShortcut(QKeySequence("H"), self)
+		self._shortcut_show_saved.setContext(Qt.ShortcutContext.WindowShortcut)
+		self._shortcut_show_saved.setAutoRepeat(False)
 		self._shortcut_toggle_play = QShortcut(QKeySequence("Space"), self)
 		self._shortcut_step_back = QShortcut(QKeySequence("Left"), self)
 		self._shortcut_step_fwd = QShortcut(QKeySequence("Right"), self)
@@ -350,12 +411,21 @@ class MainWindow(QMainWindow):
 		transport.addWidget(self._timeline, stretch=1)
 		transport.addWidget(self._grid_toggle_btn)
 		transport.addWidget(self._fan_focus_btn)
-		transport.addWidget(self._annotator_btn)
-		transport.addWidget(self._measure_mode_btn)
-		transport.addWidget(self._annotation_type_label)
-		transport.addWidget(self._annotation_type_combo)
-		transport.addWidget(self._clear_measure_btn)
+		transport.addWidget(self._flip_btn)
 		root_layout.addLayout(transport)
+
+		# Own row: one row holding every button needs more width than a scaled 1080p screen offers,
+		# which makes Qt push the window out of fullscreen whenever a button's text changes.
+		annotation_bar = QHBoxLayout()
+		annotation_bar.addWidget(self._measure_mode_btn)
+		annotation_bar.addWidget(self._annotation_type_label)
+		annotation_bar.addWidget(self._annotation_type_combo)
+		annotation_bar.addWidget(self._annotator_btn)
+		annotation_bar.addWidget(self._no_targets_btn)
+		annotation_bar.addWidget(self._show_saved_btn)
+		annotation_bar.addWidget(self._clear_measure_btn)
+		annotation_bar.addStretch(1)
+		root_layout.addLayout(annotation_bar)
 
 		display_controls = QHBoxLayout()
 		display_controls.addWidget(self._auto_intensity_btn)
@@ -422,6 +492,12 @@ class MainWindow(QMainWindow):
 		self._zoom_reset_btn.clicked.connect(self._on_zoom_reset_clicked)
 		self._grid_toggle_btn.toggled.connect(self._on_grid_toggled)
 		self._fan_focus_btn.toggled.connect(self._on_fan_focus_toggled)
+		self._flip_btn.toggled.connect(self._on_flip_toggled)
+		self._shortcut_toggle_flip.activated.connect(self._flip_btn.toggle)
+		self._no_targets_btn.clicked.connect(self._toggle_no_targets)
+		self._shortcut_no_targets.activated.connect(self._toggle_no_targets)
+		self._show_saved_btn.toggled.connect(self._on_show_saved_toggled)
+		self._shortcut_show_saved.activated.connect(self._show_saved_btn.toggle)
 		self._annotator_btn.clicked.connect(self._on_annotator_clicked)
 		self._measure_mode_btn.toggled.connect(self._on_measure_mode_toggled)
 		self._annotation_type_combo.currentIndexChanged.connect(self._on_annotation_type_changed)
@@ -724,6 +800,8 @@ class MainWindow(QMainWindow):
 			"view": {
 				"grid_enabled": DEFAULT_PROJECT_GRID,
 				"fan_focus_enabled": DEFAULT_PROJECT_FAN_FOCUS,
+				"flipped": False,
+				"show_saved_annotations": True,
 			},
 			"playback_rate": 1.0,
 		}
@@ -749,6 +827,8 @@ class MainWindow(QMainWindow):
 			"view": {
 				"grid_enabled": bool(self._grid_toggle_btn.isChecked()),
 				"fan_focus_enabled": bool(self._fan_focus_btn.isChecked()),
+				"flipped": bool(self._flip_btn.isChecked()),
+				"show_saved_annotations": bool(self._show_saved_btn.isChecked()),
 			},
 			"playback_rate": float(state.playback_rate),
 		}
@@ -825,6 +905,8 @@ class MainWindow(QMainWindow):
 			self._zoom_scale_slider.setValue(int(np.clip(int(round(zoom_scale * 10.0)), 10, 80)))
 			self._grid_toggle_btn.setChecked(grid_enabled)
 			self._fan_focus_btn.setChecked(fan_focus_enabled)
+			self._flip_btn.setChecked(bool(view.get("flipped", False)) if isinstance(view, dict) else False)
+			self._show_saved_btn.setChecked(bool(view.get("show_saved_annotations", True)) if isinstance(view, dict) else True)
 			self._controller.set_playback_rate(playback_rate)
 			self._controller.set_ping_index(max(0, int(last_ping_index)))
 		finally:
@@ -1079,6 +1161,61 @@ class MainWindow(QMainWindow):
 	def _toggle_fan_focus(self) -> None:
 		self._fan_focus_btn.toggle()
 
+	def _on_flip_toggled(self, checked: bool) -> None:
+		self._flip_btn.setText("Flip: On [V]" if checked else "Flip: Off [V]")
+		# In-progress clicks are stored in view pixels; staged ones are world-based and survive.
+		self._measure_current_points_px.clear()
+		self._measure_current_points_world.clear()
+		self._clear_box_region_selection(refresh=False)
+		self._clear_zoom_box_selection(refresh=False)
+		if self._current_frame is not None:
+			self._cart_pixmap = self._pixmap_from_bgr(self._cart_bgr_for_view(self._current_frame))
+		self._update_measurement_label()
+		self._refresh_pixmaps()
+		self._mark_project_state_dirty()
+
+	def _on_show_saved_toggled(self, checked: bool) -> None:
+		self._show_saved_btn.setText("Saved Annotations: On [H]" if checked else "Saved Annotations: Off [H]")
+		self._set_status("Saved annotations shown." if checked else "Saved annotations hidden (staged ones stay visible).")
+		self._refresh_pixmaps()
+		self._mark_project_state_dirty()
+
+	def _toggle_no_targets(self) -> None:
+		"""Mark/unmark this ping as reviewed with nothing to annotate (an empty ping file)."""
+		frame = self._current_frame
+		if frame is None:
+			self._set_status("Cannot mark ping: no frame loaded.")
+			return
+		if not self._ensure_annotator():
+			self._set_status("Cannot mark ping: annotator name is required.")
+			return
+		if self._ping_saved_count() or self._has_unsaved_annotations():
+			self._set_status("Cannot mark 'no targets': this ping has saved or staged annotations.")
+			return
+		file_path = self._controller.state().file_path
+		save_dir, _, path = self._measurement_paths(file_path, frame.ping_index, self._annotator_slug)
+		_, _, legacy = self._legacy_measurement_paths(file_path, frame.ping_index, self._annotator_slug)
+		marked, _ = self._ping_file_state()
+		try:
+			if marked:
+				path.unlink(missing_ok=True)
+				legacy.unlink(missing_ok=True)
+			else:
+				save_dir.mkdir(parents=True, exist_ok=True)
+				self._write_measurements_array(path, [])
+		except OSError as exc:
+			self._set_status(f"Failed to update ping mark: {exc}")
+			return
+		self._ping_file_cache = None
+		self._set_status(
+			f"Ping {frame.ping_index}: cleared 'no targets' mark." if marked
+			else f"Ping {frame.ping_index}: marked reviewed - no targets."
+		)
+		self._refresh_pixmaps()
+
+	def _cart_bgr_for_view(self, frame: RenderedFrame):
+		return frame.cartesian_bgr[::-1] if self._flip_btn.isChecked() else frame.cartesian_bgr
+
 	def _toggle_zoom_mode(self) -> None:
 		self._zoom_enabled_btn.toggle()
 
@@ -1280,7 +1417,7 @@ class MainWindow(QMainWindow):
 		self._clear_zoom_box_selection(refresh=False)
 		self._clear_box_region_selection(refresh=False)
 		self._polar_pixmap = self._pixmap_from_bgr(frame.polar_bgr)
-		self._cart_pixmap = self._pixmap_from_bgr(frame.cartesian_bgr)
+		self._cart_pixmap = self._pixmap_from_bgr(self._cart_bgr_for_view(frame))
 		if self._last_measurement_frame_key != frame_key:
 			self._reset_measurement_state()
 		self._last_measurement_frame_key = frame_key
@@ -1343,7 +1480,12 @@ class MainWindow(QMainWindow):
 			)
 			if self._grid_toggle_btn.isChecked():
 				scaled = self._draw_grid_overlay(scaled)
-			if self._measure_current_points_world or self._staged_measurements or self._box_region_start_px is not None:
+			if (
+				(self._show_saved_btn.isChecked() and self._ping_file_state()[0])
+				or self._measure_current_points_world
+				or self._staged_measurements
+				or self._box_region_start_px is not None
+			):
 				scaled = self._draw_measurement_overlay(scaled)
 			if self._zoom_box_start_px is not None and self._zoom_box_current_px is not None:
 				scaled = self._draw_zoom_box_overlay(scaled)
@@ -1780,14 +1922,31 @@ class MainWindow(QMainWindow):
 			self._set_status("Cannot save measurement: no staged annotations.")
 			return
 
+		first_number = self._ping_saved_count() + 1
+		dialog = ClassifyDialog(
+			self,
+			[
+				(first_number + i, s.annotation_type, self._annotation_metric_text(s))
+				for i, s in enumerate(self._staged_measurements)
+			],
+			[s.class_name or str(self._settings.value("measurement/last_class", "unknown")) for s in self._staged_measurements],
+		)
+		if dialog.exec() != QDialog.DialogCode.Accepted:
+			self._set_status("Save cancelled: annotations are still staged.")
+			return
+		classes = dialog.classes()
+		for staged, class_name in zip(self._staged_measurements, classes):
+			staged.class_name = class_name
+		self._settings.setValue("measurement/last_class", classes[-1])
+
 		state = self._controller.state()
 		frame = self._current_frame
-		save_dir, all_measurements_path, ping_measurements_path = self._measurement_paths(
+		save_dir, _, ping_measurements_path = self._measurement_paths(
 			state.file_path,
 			frame.ping_index,
 			self._annotator_slug,
 		)
-		legacy_save_dir, legacy_all_measurements_path, legacy_ping_measurements_path = self._legacy_measurement_paths(
+		_, _, legacy_ping_measurements_path = self._legacy_measurement_paths(
 			state.file_path,
 			frame.ping_index,
 			self._annotator_slug,
@@ -1795,58 +1954,29 @@ class MainWindow(QMainWindow):
 		save_dir.mkdir(parents=True, exist_ok=True)
 
 		try:
-			all_measurements = self._read_measurements_array_with_legacy(
-				primary_path=all_measurements_path,
-				legacy_path=legacy_all_measurements_path,
-			)
 			ping_measurements = self._read_measurements_array_with_legacy(
 				primary_path=ping_measurements_path,
 				legacy_path=legacy_ping_measurements_path,
 			)
-			staged_types = list(dict.fromkeys(staged.annotation_type for staged in self._staged_measurements))
-			type_all_measurements: dict[str, list[dict]] = {}
-			type_ping_measurements: dict[str, list[dict]] = {}
-			type_paths: dict[str, tuple[Path, Path]] = {}
-			for annotation_type in staged_types:
-				type_all_path, type_ping_path = self._measurement_type_paths(
-					measurements_dir=save_dir,
-					ping_index=frame.ping_index,
-					annotator_slug=self._annotator_slug,
-					annotation_type=annotation_type,
-				)
-				type_paths[annotation_type] = (type_all_path, type_ping_path)
-				legacy_type_all_path, legacy_type_ping_path = self._measurement_type_paths(
-					measurements_dir=legacy_save_dir,
-					ping_index=frame.ping_index,
-					annotator_slug=self._annotator_slug,
-					annotation_type=annotation_type,
-				)
-				type_all_measurements[annotation_type] = self._read_measurements_array_with_legacy(
-					primary_path=type_all_path,
-					legacy_path=legacy_type_all_path,
-				)
-				type_ping_measurements[annotation_type] = self._read_measurements_array_with_legacy(
-					primary_path=type_ping_path,
-					legacy_path=legacy_type_ping_path,
-				)
 		except ValueError as exc:
 			self._set_status(f"Cannot save measurement: {exc}")
 			return
 
-		measurement_seq = self._next_measurement_sequence(all_measurements)
 		ping_measurement_seq = len(ping_measurements) + 1
 		staged_count = len(self._staged_measurements)
 		for idx, staged in enumerate(self._staged_measurements):
+			# Recompute pixels from world so they match the current (possibly flipped) view.
 			geometry_points = [
-				self._measurement_point_payload(staged.points_px[i], staged.points_world[i])
-				for i in range(len(staged.points_px))
+				self._measurement_point_payload(
+					self._cart_world_to_source_pixel(world[0], world[1]) or staged.points_px[i],
+					world,
+				)
+				for i, world in enumerate(staged.points_world)
 			]
-			point_a = geometry_points[0]
-			point_b = geometry_points[-1]
-			distance_m = self._distance_between_world_points(staged.points_world[0], staged.points_world[-1])
+			number = ping_measurement_seq + idx
 			payload = {
-				"measurement_id": f"M{measurement_seq + idx:06d}",
-				"ping_measurement_index": ping_measurement_seq + idx,
+				"measurement_id": f"P{int(frame.ping_index):06d}-{number:03d}",
+				"ping_measurement_index": number,
 				"saved_at_utc": datetime.now(timezone.utc).isoformat(),
 				"source_file": state.file_path,
 				"annotator_name": self._annotator_name,
@@ -1857,37 +1987,58 @@ class MainWindow(QMainWindow):
 				"beam_deg": {"min": frame.beam_min_deg, "max": frame.beam_max_deg},
 				"range_m": {"min": frame.range_min_m, "max": frame.range_max_m},
 				"annotation_type": staged.annotation_type,
+				"view_flipped": bool(self._flip_btn.isChecked()),
+				"class_name": staged.class_name,
 				"geometry": {
 					"points": geometry_points,
 					"closed": staged.annotation_type in ("box", "polygon"),
 				},
 				"metrics": staged.metrics,
-				"point_a": point_a,
-				"point_b": point_b,
-				"distance_m": distance_m,
 			}
-			all_measurements.append(payload)
+			if staged.annotation_type == "line":
+				# Only meaningful for lines; polygons/boxes use geometry + metrics.
+				payload["point_a"] = geometry_points[0]
+				payload["point_b"] = geometry_points[-1]
+				payload["distance_m"] = self._distance_between_world_points(
+					staged.points_world[0], staged.points_world[-1]
+				)
 			ping_measurements.append(payload)
-			type_all_measurements[staged.annotation_type].append(payload)
-			type_ping_measurements[staged.annotation_type].append(payload)
 
 		try:
-			self._write_measurements_array(all_measurements_path, all_measurements)
 			self._write_measurements_array(ping_measurements_path, ping_measurements)
-			for annotation_type, (type_all_path, type_ping_path) in type_paths.items():
-				self._write_measurements_array(type_all_path, type_all_measurements[annotation_type])
-				self._write_measurements_array(type_ping_path, type_ping_measurements[annotation_type])
 		except OSError as exc:
 			self._set_status(f"Failed to save measurement: {exc}")
 			return
 
-		type_summary = ", ".join(staged_types)
-		self._set_status(
-			f"Saved {staged_count} annotation(s) to canonical + type files ({type_summary})."
-		)
+		self._ping_file_cache = None
+		self._set_status(f"Saved {staged_count} annotation(s) to {ping_measurements_path.name}.")
 		self._reset_measurement_state()
 		self._update_measurement_label()
 		self._refresh_pixmaps()
+
+	def _ping_file_state(self) -> tuple[bool, list[dict]]:
+		"""(file exists, saved records) for this ping + annotator; re-read when the file changes on disk."""
+		frame = self._current_frame
+		if frame is None or not self._annotator_slug:
+			return False, []
+		file_path = self._controller.state().file_path
+		_, _, path = self._measurement_paths(file_path, frame.ping_index, self._annotator_slug)
+		_, _, legacy = self._legacy_measurement_paths(file_path, frame.ping_index, self._annotator_slug)
+		mtimes = tuple(p.stat().st_mtime_ns if p.exists() else 0 for p in (path, legacy))
+		key = (file_path, int(frame.ping_index), self._annotator_slug, mtimes)
+		if self._ping_file_cache is not None and self._ping_file_cache[0] == key:
+			return self._ping_file_cache[1], self._ping_file_cache[2]
+		try:
+			records = self._read_measurements_array_with_legacy(primary_path=path, legacy_path=legacy)
+		except ValueError:
+			records = []
+		exists = any(mtimes)
+		self._ping_file_cache = (key, exists, records)
+		return exists, records
+
+	def _ping_saved_count(self) -> int:
+		"""Annotations already saved for this ping + annotator (badges continue from it)."""
+		return len(self._ping_file_state()[1])
 
 	def _finalize_polygon_annotation(self) -> bool:
 		if not self._measurement_mode_enabled:
@@ -1961,6 +2112,7 @@ class MainWindow(QMainWindow):
 			metrics = self._box_metrics(world_points)
 			if float(metrics["width_m"]) <= 1e-6 or float(metrics["height_m"]) <= 1e-6:
 				return None
+			metrics.update(self._region_extra_metrics(world_points, metrics))
 			return StagedAnnotation(
 				annotation_type="box",
 				points_px=box_points_px,
@@ -1977,6 +2129,7 @@ class MainWindow(QMainWindow):
 			if world_points is None:
 				return None
 			metrics = self._polygon_metrics(world_points)
+			metrics.update(self._region_extra_metrics(world_points, metrics))
 			return StagedAnnotation(
 				annotation_type="polygon",
 				points_px=list(points_px),
@@ -1985,6 +2138,25 @@ class MainWindow(QMainWindow):
 			)
 
 		return None
+
+	def _region_extra_metrics(self, points_world: list[WorldPoint], metrics: dict) -> dict:
+		"""Centroid range/bearing + raw-dB stats inside a box/polygon (for CSV export)."""
+		cx = float(metrics.get("centroid_x_m", sum(p[0] for p in points_world) / len(points_world)))
+		cz = float(metrics.get("centroid_z_m", sum(p[1] for p in points_world) / len(points_world)))
+		extra: dict = {
+			"centroid_range_m": float(np.hypot(cx, cz)),
+			"centroid_angle_deg": float(np.degrees(np.arctan2(cx, cz))),
+		}
+		frame = self._current_frame
+		if frame is not None:
+			stats = polygon_db_stats(
+				frame.polar_db,
+				frame.ranges_m,
+				frame.beam_angles_deg,
+				[(p[0], p[1]) for p in points_world],
+			)
+			extra.update({f"intensity_{key}": value for key, value in stats.items()})
+		return extra
 
 	def _points_px_to_world(self, points_px: list[tuple[float, float]]) -> list[WorldPoint] | None:
 		points_world: list[WorldPoint] = []
@@ -2035,6 +2207,8 @@ class MainWindow(QMainWindow):
 			"perimeter_m": float(perimeter_m),
 			"diagonal_m": float(diagonal_m),
 			"aspect_ratio": float(aspect_ratio),
+			"centroid_x_m": float(sum(p[0] for p in points_world) / len(points_world)),
+			"centroid_z_m": float(sum(p[1] for p in points_world) / len(points_world)),
 		}
 
 	@staticmethod
@@ -2125,23 +2299,6 @@ class MainWindow(QMainWindow):
 	def _project_state_path(self, source_file: str) -> Path:
 		return self._project_root_dir(source_file) / "project_state.json"
 
-	def _measurement_type_paths(
-		self,
-		*,
-		measurements_dir: Path,
-		ping_index: int,
-		annotator_slug: str,
-		annotation_type: str,
-	) -> tuple[Path, Path]:
-		type_slug = re.sub(r"[^A-Za-z0-9._-]+", "_", annotation_type.strip().lower()).strip("._-")
-		if not type_slug:
-			type_slug = "unknown"
-		all_type_path = measurements_dir / f"all_measurements_{annotator_slug}_{type_slug}.json"
-		ping_type_path = (
-			measurements_dir / f"ping_{int(ping_index):06d}_measurements_{annotator_slug}_{type_slug}.json"
-		)
-		return all_type_path, ping_type_path
-
 	def _dataset_folder_name(self, source_file: str) -> str:
 		name = Path(source_file).stem.strip() if source_file else ""
 		if not name:
@@ -2149,18 +2306,6 @@ class MainWindow(QMainWindow):
 		# Keep dataset folder names readable and cross-platform safe.
 		safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._")
 		return safe_name or "unknown_dataset"
-
-	def _next_measurement_sequence(self, all_measurements: list[dict]) -> int:
-		max_seq = 0
-		for entry in all_measurements:
-			if not isinstance(entry, dict):
-				continue
-			measurement_id = str(entry.get("measurement_id", "")).strip()
-			match = re.fullmatch(r"M(\d+)", measurement_id)
-			if match is None:
-				continue
-			max_seq = max(max_seq, int(match.group(1)))
-		return (max_seq + 1) if max_seq > 0 else (len(all_measurements) + 1)
 
 	def _read_measurements_array(self, path: Path) -> list[dict]:
 		if not path.exists():
@@ -2174,7 +2319,10 @@ class MainWindow(QMainWindow):
 		return data
 
 	def _write_measurements_array(self, path: Path, measurements: list[dict]) -> None:
-		path.write_text(json.dumps(measurements, indent=2), encoding="utf-8")
+		# Write-then-swap so a crash mid-save can never leave a truncated file.
+		tmp = path.with_name(path.name + ".tmp")
+		tmp.write_text(json.dumps(measurements, indent=2), encoding="utf-8")
+		os.replace(tmp, path)
 
 	def _read_measurements_array_with_legacy(self, *, primary_path: Path, legacy_path: Path) -> list[dict]:
 		primary = self._read_measurements_array(primary_path)
@@ -2234,6 +2382,8 @@ class MainWindow(QMainWindow):
 			return None
 
 		scale = img_w / width_m
+		if self._flip_btn.isChecked():
+			pixel_v = (img_h - 1) - pixel_v
 		x_m = frame.cart_x_max_m - (pixel_u / scale)
 		z_m = frame.cart_z_min_m + ((img_h - 1 - pixel_v) / scale)
 		range_m = float(np.hypot(x_m, z_m))
@@ -2251,6 +2401,8 @@ class MainWindow(QMainWindow):
 		scale = img_w / width_m
 		pixel_u = (frame.cart_x_max_m - float(x_m)) * scale
 		pixel_v = (img_h - 1) - ((float(z_m) - frame.cart_z_min_m) * scale)
+		if self._flip_btn.isChecked():
+			pixel_v = (img_h - 1) - pixel_v
 		if not np.isfinite(pixel_u) or not np.isfinite(pixel_v):
 			return None
 		return float(pixel_u), float(pixel_v)
@@ -2443,15 +2595,59 @@ class MainWindow(QMainWindow):
 					display_points[0][1],
 				)
 
+		def _draw_badge(display_points: list[tuple[int, int]], *, is_line: bool, number: object, rgb: tuple, label: str = "") -> None:
+			# Badge at the shape's mean point (lines nudged up so it doesn't cover the stroke).
+			cx = sum(p[0] for p in display_points) // len(display_points)
+			cy = sum(p[1] for p in display_points) // len(display_points)
+			if is_line:
+				cy -= 14
+			painter.save()
+			painter.setPen(QPen(QColor(255, 255, 255)))
+			painter.setBrush(QColor(*rgb))
+			painter.drawEllipse(cx - 10, cy - 10, 20, 20)
+			painter.drawText(cx - 10, cy - 10, 20, 20, Qt.AlignmentFlag.AlignCenter, str(number))
+			if label:
+				painter.setPen(QPen(QColor(*rgb)))
+				painter.drawText(cx + 14, cy + 5, label)
+			painter.restore()
+
+		# Saved annotations for this ping, coloured by class.
+		file_exists, saved = self._ping_file_state() if self._show_saved_btn.isChecked() else (False, [])
+		for position, record in enumerate(saved, start=1):
+			if not isinstance(record, dict):
+				continue
+			try:
+				points = [(float(pt["x_m"]), float(pt["z_m"]), 0.0, 0.0) for pt in record["geometry"]["points"]]
+			except (KeyError, TypeError, ValueError):
+				continue
+			display_points = [d for d in map(_world_to_display, points) if d is not None]
+			if not display_points:
+				continue
+			class_name = str(record.get("class_name") or "unknown")
+			rgb = ANNOTATION_CLASS_COLORS.get(class_name, ANNOTATION_CLASS_COLORS["unknown"])
+			saved_pen = QPen(QColor(*rgb))
+			saved_pen.setWidth(2)
+			painter.setPen(saved_pen)
+			is_line = record.get("annotation_type") == "line"
+			_draw_polyline(display_points, closed=not is_line)
+			_draw_badge(
+				display_points,
+				is_line=is_line,
+				number=record.get("ping_measurement_index", position),
+				rgb=rgb,
+				label=class_name,
+			)
+
 		staged_pen = QPen(QColor(0, 128, 128))
 		staged_pen.setWidth(2)
 		painter.setPen(staged_pen)
-		for staged in self._staged_measurements:
+		first_number = self._ping_saved_count() + 1
+		for idx, staged in enumerate(self._staged_measurements):
 			display_points = _draw_world_points(staged.points_world)
-			if staged.annotation_type == "line":
-				_draw_polyline(display_points, closed=False)
-			else:
-				_draw_polyline(display_points, closed=True)
+			is_line = staged.annotation_type == "line"
+			_draw_polyline(display_points, closed=not is_line)
+			if display_points:
+				_draw_badge(display_points, is_line=is_line, number=first_number + idx, rgb=(0, 128, 128))
 
 		active_pen = QPen(QColor(0, 255, 255))
 		active_pen.setWidth(2)
@@ -2472,6 +2668,10 @@ class MainWindow(QMainWindow):
 			_draw_polyline(box_display, closed=True)
 		elif self._active_annotation_type == "polygon":
 			_draw_polyline(display_points, closed=False)
+
+		if file_exists and not saved and not self._staged_measurements:
+			painter.setPen(QPen(QColor(*ANNOTATION_CLASS_COLORS["habitat"])))
+			painter.drawText(10, 20, "Reviewed - no targets")
 
 		painter.end()
 		return out
@@ -2565,6 +2765,19 @@ class MainWindow(QMainWindow):
 
 	@staticmethod
 	def _annotation_metrics_self_check() -> None:
+		assert "unknown" in ANNOTATION_CLASSES and len(set(ANNOTATION_CLASSES)) == len(ANNOTATION_CLASSES)
+		assert set(ANNOTATION_CLASS_COLORS) == set(ANNOTATION_CLASSES)
+
+		# Intensity stats: -50 dB background with a -10 dB block; polygon covers the block exactly.
+		ranges = np.arange(1.0, 10.0, 0.01)
+		beams = np.linspace(-30.0, 30.0, 241)
+		xs = ranges[:, None] * np.sin(np.deg2rad(beams))[None, :]
+		zs = ranges[:, None] * np.cos(np.deg2rad(beams))[None, :]
+		block = (np.abs(xs) < 0.5) & (zs > 4.5) & (zs < 5.5)
+		db = np.where(block, -10.0, -50.0).astype(np.float32)
+		stats = polygon_db_stats(db, ranges, beams, [(-0.5, 4.5), (0.5, 4.5), (0.5, 5.5), (-0.5, 5.5)])
+		assert stats["samples"] == int(block.sum()) and abs(stats["mean_db"] + 10.0) < 1e-6 and stats["std_db"] < 1e-6
+		assert polygon_db_stats(db, ranges, beams, [(5, 5), (6, 5), (6, 6)])["samples"] == 0
 		world = lambda x, z: (float(x), float(z), float(np.hypot(x, z)), float(np.degrees(np.arctan2(x, z))))
 		line_metrics = MainWindow._line_metrics(world(0.0, 0.0), world(3.0, 4.0))
 		assert abs(float(line_metrics["length_m"]) - 5.0) < 1e-9
@@ -2575,6 +2788,7 @@ class MainWindow(QMainWindow):
 		assert abs(float(box_metrics["width_m"]) - 3.0) < 1e-9
 		assert abs(float(box_metrics["height_m"]) - 4.0) < 1e-9
 		assert abs(float(box_metrics["area_m2"]) - 12.0) < 1e-9
+		assert abs(float(box_metrics["centroid_x_m"]) - 0.5) < 1e-9 and abs(float(box_metrics["centroid_z_m"]) - 3.0) < 1e-9
 
 		polygon_metrics = MainWindow._polygon_metrics([world(0.0, 0.0), world(2.0, 0.0), world(2.0, 2.0), world(0.0, 2.0)])
 		assert abs(float(polygon_metrics["perimeter_m"]) - 8.0) < 1e-9

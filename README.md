@@ -98,6 +98,9 @@ Output is written to `releases\` as a versioned zip containing the full `Flexvie
 
 - `Grid: On/Off [G]`: toggle fan-view grid overlay.
 - `Fan Focus: On/Off [F]`: hide/show the polar panel to give the fan view more space.
+- `Flip: On/Off [V]`: vertically flip the fan view (narrow apex on top, widening downward). Annotations stay in world coordinates; saved records include `view_flipped`.
+- `No Targets [N]`: mark the current ping as reviewed with nothing to annotate (writes an empty ping file); press again to clear. Refused if the ping already has saved or staged annotations.
+- `Saved Annotations: On/Off [H]`: show/hide already-saved annotations (and the "no targets" text) on the fan; staged annotations always stay visible. Persisted per dataset.
 - `Zoom: On/Off [Z]`: toggle cartesian zoom mode.
 - `Reset Zoom [R]`: reset zoom quickly when zoom mode is enabled.
 - Polar and cartesian fan views are shown side-by-side.
@@ -110,7 +113,8 @@ Output is written to `releases\` as a versioned zip containing the full `Flexvie
 - `Box`: click and drag a region in the cartesian fan view, then release to stage one annotation.
 - `Polygon`: click vertices point-by-point, then double-click or press `Enter` to close and stage.
 - `Ctrl+Z`: undo last click (or last staged annotation if no active click).
-- `S`: save all staged measurements.
+- `S`: save all staged measurements. A dialog asks for a class per numbered annotation (habitat, shark, fish, school, diver, unknown; prefilled with the last class used). Staged annotations show a numbered badge that continues from the annotations already saved on that ping.
+- Saved annotations for the current ping are redrawn automatically (numbered badge, class label, class colour: habitat green, shark red, fish blue, school purple, diver yellow, unknown gray). Staged, not-yet-saved annotations are teal. A ping marked with `No Targets` shows "Reviewed - no targets".
 - `Annotator` button: set the annotator name used in saved measurement files.
 
 ## Features
@@ -139,18 +143,23 @@ Output is written to `releases\` as a versioned zip containing the full `Flexvie
 
 Saved under:
 
-- `outputs/<dataset_name>_project/measurements/<annotator_slug>/all_measurements_<annotator_slug>.json`
 - `outputs/<dataset_name>_project/measurements/<annotator_slug>/ping_<ping_index>_measurements_<annotator_slug>.json`
-- `outputs/<dataset_name>_project/measurements/<annotator_slug>/all_measurements_<annotator_slug>_<annotation_type>.json`
-- `outputs/<dataset_name>_project/measurements/<annotator_slug>/ping_<ping_index>_measurements_<annotator_slug>_<annotation_type>.json`
+
+One file per ping per annotator, holding every annotation (all types) saved on that ping. An empty file (`[]`) means the ping was reviewed with no targets. Each save appends to it with an atomic write-then-swap. Older `all_measurements_*` and `*_<annotation_type>.json` copies are no longer written; they can be deleted, and a CSV report should be built by reading the `ping_*` files.
 
 Each measurement includes:
 
+- `measurement_id` (`P<ping_index>-<n>`) and `ping_measurement_index` (n, the number shown on the badge)
 - ping/frame metadata
 - `annotation_type` (`line`, `box`, `polygon`)
+- `class_name` (`habitat`, `shark`, `fish`, `school`, `diver`, `unknown`; absent on older records)
+- `view_flipped` (whether the fan view was flipped when saved)
 - `geometry.points` with pixel/world coordinates for all points
-- `metrics` (type-specific values, for example line length, box area, polygon perimeter)
-- compatibility fields `point_a`, `point_b`, and `distance_m`
+- `metrics` (type-specific values):
+  - line: `length_m` (plus `point_a`, `point_b`, `distance_m`, which are written for lines only)
+  - box/polygon: size and position (`area_m2`, `perimeter_m`, centroid `x/z`, `centroid_range_m`, `centroid_angle_deg`; boxes also width/height/diagonal/aspect ratio (box centroid is the corner mean); polygons `vertex_count`)
+  - box/polygon intensity inside the region, from raw magnitude dB (no display TVG/windowing, -120 dB floor): `intensity_samples`, `intensity_mean_db`, `intensity_max_db`, `intensity_std_db` (`null` if no samples fall inside)
+  - older records lack the centroid range/angle and intensity keys, so readers should treat them as optional
 - annotator identity and save timestamp
 
 The player reads legacy measurement JSON from `outputs/<dataset_name>/measurements/...` when the new `_project` location does not exist yet, then continues saving to `_project`.
