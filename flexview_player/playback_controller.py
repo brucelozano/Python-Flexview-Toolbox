@@ -104,6 +104,7 @@ class PlayerState:
 	zoom_center_z_m: float = float("nan")
 	last_loaded_ping_number: int = 0
 	discovered_max_ping_index: int = 1000
+	total_frames: int = 0  # 0 = unknown (still counting / count failed)
 
 
 class PlaybackController(QObject):
@@ -113,9 +114,11 @@ class PlaybackController(QObject):
 	state_changed = Signal(object)
 	frame_ready = Signal(object)
 	prefetch_event = Signal(object)
+	_frame_count_done = Signal(str, int)
 
 	def __init__(self) -> None:
 		super().__init__()
+		self._frame_count_done.connect(self._on_frame_count_done)
 		self._worker = MatlabDataWorker()
 		self._state = PlayerState()
 		self._show_grid = True
@@ -227,6 +230,13 @@ class PlaybackController(QObject):
 		self._state.file_path = str(path.resolve())
 		self._state.current_ping_index = 0
 		self._state.discovered_max_ping_index = 1000
+		self._state.total_frames = self._worker.frame_count(self._state.file_path, allow_slow=False) or 0
+		if not self._state.total_frames:
+			path_str = self._state.file_path
+			threading.Thread(
+				target=lambda: self._frame_count_done.emit(path_str, self._worker.frame_count(path_str) or 0),
+				daemon=True,
+			).start()
 		# Re-initialize center when the dataset changes so stale coordinates are not reused.
 		self._state.zoom_center_x_m = float("nan")
 		self._state.zoom_center_z_m = float("nan")
@@ -238,6 +248,12 @@ class PlaybackController(QObject):
 		if self._decoder_ready():
 			self._load_frame(0, status=True)
 			self._configure_prefetch_for_current_file()
+
+	@Slot(str, int)
+	def _on_frame_count_done(self, file_path: str, count: int) -> None:
+		if count > 0 and file_path == self._state.file_path:
+			self._state.total_frames = count
+			self.state_changed.emit(self.state())
 
 	def toggle_play(self) -> None:
 		if not self._state.file_path:
@@ -433,6 +449,18 @@ class PlaybackController(QObject):
 				self._emit_state("Connect MATLAB first or switch back to Python decoder.")
 			return False
 		requested_ping_index = max(0, int(ping_index))
+		total = self._state.total_frames
+		if total and requested_ping_index >= total:
+			# Known end of file: stop cleanly instead of asking MATLAB for a ping that can't exist.
+			requested_ping_index = total - 1
+			if requested_ping_index == self._state.current_ping_index and self._state.is_playing:
+				self._state.is_playing = False
+				self._timer.stop()
+				if status:
+					self._emit_state(f"Reached end of file (ping index {total - 1} of {total}).")
+				else:
+					self.state_changed.emit(self.state())
+				return False
 		if self._should_wait_for_prefetch(requested_ping_index):
 			self._begin_prefetch_wait(requested_ping_index)
 			if status:

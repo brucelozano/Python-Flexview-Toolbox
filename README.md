@@ -74,7 +74,7 @@ Output is written to `releases\` as a versioned zip containing the full `Flexvie
    - For `.mmb`/`.00x`, the player asks whether to enable pre-render and how many frames to decode per chunk.
 2. Playback uses the Python decoder by default.
 3. Optional: click `Connect MATLAB (Use MATLAB Decoder)` to switch decoding to MATLAB for verification.
-3. Navigate pings with play/pause, step buttons, timeline, and ping index spinner.
+3. Navigate pings with play/pause, step buttons, timeline, and ping index spinner. The info panel shows `Index: N / last (total pings)`; the total is counted in the background when a file is opened (header scan, cached) and also caps the timeline and spinner. Ping indices are per file: each split segment (`.mmb`, `.001`, ...) is its own 0-based file, so the total covers only the segment you opened.
 4. Toggle `Grid` and `Fan Focus` as needed while reviewing the fan view.
 5. Use measurement mode to stage and save line/box/polygon annotations on the fan view.
 
@@ -145,6 +145,7 @@ Output is written to `releases\` as a versioned zip containing the full `Flexvie
 Saved under:
 
 - `outputs/<dataset_name>_project/measurements/<annotator_slug>/ping_<ping_index>_measurements_<annotator_slug>.json`
+- Split files: ping indices restart at 0 in every segment, so each segment gets its own project: `.mmb`/`.imb` -> `<stem>_project`, `.001` -> `<stem>.001_project`, and so on. Annotations, project state, and CSV reports are never shared between segments.
 
 One file per ping per annotator, holding every annotation (all types) saved on that ping. An empty file (`[]`) means the ping was reviewed with no targets. Each save appends to it with an atomic write-then-swap. Older `all_measurements_*` and `*_<annotation_type>.json` copies are no longer written; they can be deleted, and a CSV report should be built by reading the `ping_*` files.
 

@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import struct
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -27,6 +28,30 @@ DISK_CACHE_BUDGET_DEFAULT_BYTES = 10 * 1024 * 1024 * 1024
 DISK_CACHE_EVICT_EVERY_N_WRITES = 16
 FRAME_COUNT_INDEX_FILENAME = "frame_count_index.json"
 DECODED_CACHE_KEY_VERSION = "v2"
+MMB_RAW_PING_PACKET_TYPE = 0x100B
+
+
+def count_mmb_pings(file_path: str) -> int:
+	"""Count raw ping packets in ONE .mmb/.NNN file by hopping packet headers (56 B read per packet).
+
+	The MATLAB loader indexes pings per file (it never crosses into .001/.002...), so this
+	matches the valid ping index range of the file that is opened.
+	"""
+	size = os.path.getsize(file_path)
+	count = pos = 0
+	with open(file_path, "rb") as fh:
+		while pos + 56 <= size:
+			fh.seek(pos)
+			head = fh.read(56)
+			if head[:8] != b"\x00\x80" * 4:
+				break
+			data_type = struct.unpack_from("<H", head, 8)[0]
+			body_size = struct.unpack_from("<I", head, 52)[0]
+			if pos + 56 + body_size + 44 > size:  # truncated trailing packet is not loadable
+				break
+			count += data_type == MMB_RAW_PING_PACKET_TYPE
+			pos += 56 + body_size + 44
+	return count
 
 
 @dataclass
@@ -180,12 +205,16 @@ class MatlabDataWorker:
 		if not allow_slow:
 			return None
 		try:
-			with self._decode_lock:
-				reader = self._native_readers.get(file_key)
-				if reader is None:
-					reader = NativeFlexviewReader(file_key)
-					self._native_readers[file_key] = reader
-				count = int(reader.frame_count)
+			suffix = Path(file_key).suffix.lower()
+			if suffix == ".mmb" or re.fullmatch(r"\.\d{3}", suffix):
+				count = count_mmb_pings(file_key)  # no decode lock: pure file-header reads
+			else:
+				with self._decode_lock:
+					reader = self._native_readers.get(file_key)
+					if reader is None:
+						reader = NativeFlexviewReader(file_key)
+						self._native_readers[file_key] = reader
+					count = int(reader.frame_count)
 		except Exception:
 			return None
 		if count <= 0:
@@ -670,3 +699,17 @@ class MatlabDataWorker:
 			)
 		except OSError:
 			return
+
+if __name__ == "__main__":
+	import tempfile
+
+	def _pkt(data_type: int, body: int = 8) -> bytes:
+		return b"\x00\x80" * 4 + struct.pack("<H", data_type) + bytes(42) + struct.pack("<I", body) + bytes(body) + bytes(44)
+
+	with tempfile.TemporaryDirectory() as tmp:
+		p = Path(tmp) / "x.mmb"
+		p.write_bytes(_pkt(0x100A) + _pkt(0x100B) * 3 + _pkt(0x100B)[:-10])  # cfg + 3 pings + truncated 4th
+		assert count_mmb_pings(str(p)) == 3, count_mmb_pings(str(p))
+		p.write_bytes(b"garbage" * 20)
+		assert count_mmb_pings(str(p)) == 0
+	print("count_mmb_pings self-check OK")

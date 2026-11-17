@@ -1193,7 +1193,7 @@ class MainWindow(QMainWindow):
 		root = self._project_root_dir(file_path)
 		csv_path = root / "reports" / f"annotations_{self._dataset_folder_name(file_path)}.csv"
 		try:
-			summary = export_annotations_csv(root / "measurements", csv_path, Path(file_path).stem)
+			summary = export_annotations_csv(root / "measurements", csv_path, self._dataset_label(file_path))
 		except OSError as exc:
 			self._set_status(f"CSV export failed: {exc}")
 			QMessageBox.warning(self, "CSV export failed", f"{exc}\n\nIf the file is open in Excel, close it and try again.")
@@ -1323,9 +1323,14 @@ class MainWindow(QMainWindow):
 		self._ping_spin.setValue(state.current_ping_index)
 		self._ping_spin.blockSignals(False)
 		self._timeline.blockSignals(True)
-		self._timeline.setMaximum(max(1, state.discovered_max_ping_index))
+		last_index = state.total_frames - 1 if state.total_frames else state.discovered_max_ping_index
+		self._timeline.setMaximum(max(1, last_index))
 		self._timeline.setValue(state.current_ping_index)
 		self._timeline.blockSignals(False)
+		self._ping_spin.blockSignals(True)
+		self._ping_spin.setMaximum(last_index if state.total_frames else 10_000_000)
+		self._ping_spin.blockSignals(False)
+		self._update_meta_label(state.total_frames)
 		if self._auto_intensity_btn.isChecked() != state.auto_intensity_enabled:
 			self._auto_intensity_btn.blockSignals(True)
 			self._auto_intensity_btn.setChecked(state.auto_intensity_enabled)
@@ -1457,13 +1462,22 @@ class MainWindow(QMainWindow):
 		self._last_measurement_frame_key = frame_key
 		self._update_measurement_label()
 		self._refresh_pixmaps()
+		self._update_meta_label(state.total_frames)
+		self._ping_time_label.setText(f"Ping Time: {frame.ping_timestamp_utc}")
+
+	def _update_meta_label(self, total_frames: int) -> None:
+		frame = self._current_frame
+		if frame is None:
+			return
+		index_text = (
+			f"{frame.ping_index} / {total_frames - 1} ({total_frames} pings)" if total_frames else f"{frame.ping_index} / ?"
+		)
 		self._meta_label.setText(
-			f"Index: {frame.ping_index} | Ping: {frame.ping_number} | "
+			f"Index: {index_text} | Ping: {frame.ping_number} | "
 			f"Size: {frame.shape[0]} x {frame.shape[1]} | "
 			f"Beam: {frame.beam_min_deg:.2f} to {frame.beam_max_deg:.2f} deg | "
 			f"Range: {frame.range_min_m:.2f} to {frame.range_max_m:.2f} m"
 		)
-		self._ping_time_label.setText(f"Ping Time: {frame.ping_timestamp_utc}")
 
 	def resizeEvent(self, event) -> None:  # type: ignore[override]
 		super().resizeEvent(event)
@@ -2334,8 +2348,20 @@ class MainWindow(QMainWindow):
 	def _project_state_path(self, source_file: str) -> Path:
 		return self._project_root_dir(source_file) / "project_state.json"
 
+	@staticmethod
+	def _dataset_label(source_file: str) -> str:
+		"""File stem, plus the segment number for split files (.001 -> '<stem>.001').
+
+		Ping indices restart at 0 in every segment, so each segment needs its own project.
+		"""
+		if not source_file:
+			return ""
+		path = Path(source_file)
+		name = path.stem.strip()
+		return f"{name}.{path.suffix[1:]}" if re.fullmatch(r"\.\d{3}", path.suffix) else name
+
 	def _dataset_folder_name(self, source_file: str) -> str:
-		name = Path(source_file).stem.strip() if source_file else ""
+		name = self._dataset_label(source_file)
 		if not name:
 			return "unknown_dataset"
 		# Keep dataset folder names readable and cross-platform safe.
