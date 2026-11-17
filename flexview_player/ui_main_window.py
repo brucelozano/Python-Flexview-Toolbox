@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
 
 from flexview_py.geometry import polygon_db_stats
 
+from .annotation_export import export_annotations_csv
 from .data_worker import RenderedFrame
 from .playback_controller import PlaybackController, PlayerState
 
@@ -237,6 +238,7 @@ class MainWindow(QMainWindow):
 		self._fan_focus_btn = QPushButton("Fan Focus: Off [F]")
 		self._fan_focus_btn.setCheckable(True)
 		self._fan_focus_btn.setChecked(False)
+		self._export_csv_btn = QPushButton("Export CSV")
 		self._no_targets_btn = QPushButton("No Targets [N]")
 		self._show_saved_btn = QPushButton("Saved Annotations: On [H]")
 		self._show_saved_btn.setCheckable(True)
@@ -348,6 +350,7 @@ class MainWindow(QMainWindow):
 		top_bar.addWidget(self._connect_btn)
 		top_bar.addWidget(self._disconnect_btn)
 		top_bar.addStretch(1)
+		top_bar.addWidget(self._export_csv_btn)
 		root_layout.addLayout(top_bar)
 
 		info_panel = QWidget(self)
@@ -495,6 +498,7 @@ class MainWindow(QMainWindow):
 		self._flip_btn.toggled.connect(self._on_flip_toggled)
 		self._shortcut_toggle_flip.activated.connect(self._flip_btn.toggle)
 		self._no_targets_btn.clicked.connect(self._toggle_no_targets)
+		self._export_csv_btn.clicked.connect(self._on_export_csv)
 		self._shortcut_no_targets.activated.connect(self._toggle_no_targets)
 		self._show_saved_btn.toggled.connect(self._on_show_saved_toggled)
 		self._shortcut_show_saved.activated.connect(self._show_saved_btn.toggle)
@@ -1179,6 +1183,36 @@ class MainWindow(QMainWindow):
 		self._set_status("Saved annotations shown." if checked else "Saved annotations hidden (staged ones stay visible).")
 		self._refresh_pixmaps()
 		self._mark_project_state_dirty()
+
+	def _on_export_csv(self) -> None:
+		"""Write every saved annotation (all annotators) for this dataset to one CSV, ordered by ping."""
+		file_path = self._controller.state().file_path
+		if not file_path:
+			self._set_status("Cannot export CSV: no file loaded.")
+			return
+		root = self._project_root_dir(file_path)
+		csv_path = root / "reports" / f"annotations_{self._dataset_folder_name(file_path)}.csv"
+		try:
+			summary = export_annotations_csv(root / "measurements", csv_path, Path(file_path).stem)
+		except OSError as exc:
+			self._set_status(f"CSV export failed: {exc}")
+			QMessageBox.warning(self, "CSV export failed", f"{exc}\n\nIf the file is open in Excel, close it and try again.")
+			return
+		if summary["rows"] == 0:
+			self._set_status("CSV export: no saved annotations yet.")
+			QMessageBox.information(self, "Export CSV", "No saved annotations or 'no targets' marks found for this dataset yet.")
+			return
+		lines = [
+			f"{summary['rows']} row(s) from {summary['pings']} ping(s); annotator(s): {', '.join(summary['annotators'])}.",
+			f"{summary['no_target_pings']} ping(s) marked 'no targets'.",
+			str(csv_path),
+		]
+		if self._staged_measurements:
+			lines.insert(2, f"Note: {len(self._staged_measurements)} staged annotation(s) are not saved yet, so not included.")
+		if summary["skipped"]:
+			lines.insert(2, "Skipped unreadable file(s): " + ", ".join(summary["skipped"]))
+		self._set_status(f"Exported {summary['rows']} row(s) to {csv_path.name}.")
+		QMessageBox.information(self, "CSV exported", "\n".join(lines))
 
 	def _toggle_no_targets(self) -> None:
 		"""Mark/unmark this ping as reviewed with nothing to annotate (an empty ping file)."""
@@ -1983,6 +2017,7 @@ class MainWindow(QMainWindow):
 				"annotator_slug": self._annotator_slug,
 				"ping_index": frame.ping_index,
 				"ping_number": frame.ping_number,
+				"ping_timestamp_utc": frame.ping_timestamp_utc,
 				"frame_shape": {"rows": frame.shape[0], "cols": frame.shape[1]},
 				"beam_deg": {"min": frame.beam_min_deg, "max": frame.beam_max_deg},
 				"range_m": {"min": frame.range_min_m, "max": frame.range_max_m},

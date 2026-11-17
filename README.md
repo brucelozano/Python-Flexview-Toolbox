@@ -101,6 +101,7 @@ Output is written to `releases\` as a versioned zip containing the full `Flexvie
 - `Flip: On/Off [V]`: vertically flip the fan view (narrow apex on top, widening downward). Annotations stay in world coordinates; saved records include `view_flipped`.
 - `No Targets [N]`: mark the current ping as reviewed with nothing to annotate (writes an empty ping file); press again to clear. Refused if the ping already has saved or staged annotations.
 - `Saved Annotations: On/Off [H]`: show/hide already-saved annotations (and the "no targets" text) on the fan; staged annotations always stay visible. Persisted per dataset.
+- `Export CSV` (top right): write one CSV of every saved annotation for the dataset (all annotators), ordered by ping index. See *CSV Report* below.
 - `Zoom: On/Off [Z]`: toggle cartesian zoom mode.
 - `Reset Zoom [R]`: reset zoom quickly when zoom mode is enabled.
 - Polar and cartesian fan views are shown side-by-side.
@@ -150,7 +151,7 @@ One file per ping per annotator, holding every annotation (all types) saved on t
 Each measurement includes:
 
 - `measurement_id` (`P<ping_index>-<n>`) and `ping_measurement_index` (n, the number shown on the badge)
-- ping/frame metadata
+- ping/frame metadata (including `ping_timestamp_utc`, absent on older records)
 - `annotation_type` (`line`, `box`, `polygon`)
 - `class_name` (`habitat`, `shark`, `fish`, `school`, `diver`, `unknown`; absent on older records)
 - `view_flipped` (whether the fan view was flipped when saved)
@@ -163,6 +164,17 @@ Each measurement includes:
 - annotator identity and save timestamp
 
 The player reads legacy measurement JSON from `outputs/<dataset_name>/measurements/...` when the new `_project` location does not exist yet, then continues saving to `_project`.
+
+## CSV Report
+
+`Export CSV` writes `outputs/<dataset_name>_project/reports/annotations_<dataset_name>.csv` (overwritten each time; regenerate any time from the saved `ping_*` JSON files).
+
+- One row per annotation, sorted by `ping_index` (numeric), then annotator, then `annotation_number`.
+- Only pings that were annotated or marked `No Targets` appear. Pings you never touched (for example 0-9 and 21-50 when only 10-20 were reviewed) are simply absent.
+- A ping marked `No Targets` is one row with `status = no_targets` and the annotation columns empty; annotated rows have `status = annotated`.
+- Columns: `dataset, annotator, ping_index, ping_number, ping_timestamp_utc, annotation_number, measurement_id, status, annotation_type, class_name`, then centroid (`centroid_x_m, centroid_z_m, centroid_range_m, centroid_angle_deg`; for lines the midpoint), size (`length_m, width_m, height_m, area_m2, perimeter_m, vertex_count`), intensity (`intensity_samples, intensity_mean_db, intensity_max_db, intensity_std_db`), and `saved_at_utc`.
+- Metrics that do not apply to a type, or that older records lack (including `ping_timestamp_utc` on records saved before it was added), are left empty.
+- Saved as UTF-8 with BOM so Excel opens it directly. If the file is open in Excel when you export, close it first.
 
 ## Dataset Project State
 
